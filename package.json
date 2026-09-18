@@ -1,0 +1,14 @@
+{
+  "name": "@live-codes/browser-fortran",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Client-side Fortran playground: compiles and runs Fortran in the browser via f2c and Clang compiled to WebAssembly.",
+  "license": "MIT",
+  "scripts": {
+    "start": "node serve.js 8127 public",
+    "start:isolation": "node serve.js 8127 public --isolation",
+    "assets": "npx --yes --package @live-codes/clang-wasm clang-wasm-copy-assets public/clang",
+    "check": "node --check serve.js && node --check public/main.js"
+  }
+}
