@@ -175,6 +175,33 @@ A trap like this used to escape the driver as a rejection. It does not any more:
 result with `exitCode: null`, whatever the program managed to print, and a message that names the
 routine where it can (§8).
 
+### Where the wall between F77 and modern Fortran actually is
+
+Measured, not assumed, by running each of these through the package. The boundary is not where "it is
+Fortran 77" suggests — several Fortran 90 spellings work, and one of them is worse than a failure.
+
+**Accepted and correct:** lowercase keywords; `!` comments; `IMPLICIT NONE`; `END DO` instead of a
+labelled `CONTINUE`; `DO WHILE`. Those are F90-isms that f2c happens to take.
+
+**Rejected, cleanly, with a line number:** free-form source (`illegal continuation card …`), which is
+the first wall anyone pasting modern code hits; `INTEGER :: X` and `REAL(8) :: X` and
+`CHARACTER(LEN=10)` (`syntax error`); whole-array arithmetic `B = A + 1.0` (`wrong number of
+subscripts`); `MODULE`/`USE`, derived types, `ALLOCATABLE`, `CONTAINS` (`unclassifiable statement`).
+
+**Accepted, and wrong.** `PRINT *, A(2:3)` on a `REAL A(4)` compiles, links, runs, exits 0, and prints
+**all four elements**. f2c reads `x(a:b)` as a character-substring reference, does not reject it for a
+numeric array, and generates the whole-array print without so much as a warning — its output for that
+case is byte-identical to its output for a clean compile, so `errors` cannot see it and there is
+nothing to surface. Assigning a section, `B(1:2) = A(3:4)`, is rejected (`substring of noncharacter b`),
+so it is the read that goes quiet.
+
+That is the single worst behaviour found in the whole spike, and it is not cheaply guardable: `S(1:3)`
+on a `CHARACTER` is *valid* Fortran 77, so `x(a:b)` cannot be rejected wholesale without type
+analysis. A playground that calls this entry plain `fortran` is inviting exactly this paste.
+
+`SUM(A)` is a different flavour: f2c accepts the name, and the *link* fails with
+`undefined symbol: sum_` — confusing, but at least loud.
+
 ## 6. Payload
 
 Both halves ship inside their packages (§8), and both packages are published, so every byte now comes
