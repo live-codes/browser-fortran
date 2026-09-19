@@ -170,9 +170,8 @@
     <script type="importmap">
       {
         "imports": {
-          "@live-codes/clang-wasm/toolchain": "/vendor/clang-wasm/toolchain.js",
-          "@wasm-idle/llvm-core/clang": "https://cdn.jsdelivr.net/npm/@wasm-idle/llvm-core@1.0.0/clang/+esm",
-          "@bjorn3/browser_wasi_shim": "https://cdn.jsdelivr.net/npm/@bjorn3/browser_wasi_shim@0.4.2/+esm"
+          "@live-codes/fortran-wasm": "/vendor/fortran-wasm/index.js",
+          "@live-codes/clang-wasm/toolchain": "https://cdn.jsdelivr.net/npm/@live-codes/clang-wasm@0.2.0/toolchain/+esm"
         }
       }
     </script>
@@ -231,9 +230,9 @@
       <section>
         <div class="pane-head">stdin <span class="hint">read by READ; empty means end-of-input</span></div>
         <textarea id="stdin" spellcheck="false" autocomplete="off" placeholder="one value per READ"></textarea>
-        <div class="pane-head">Program output <span class="hint">stdout, streamed as the program runs</span></div>
+        <div class="pane-head">Program output <span class="hint">stdout, shown when the program has finished</span></div>
         <pre id="output" class="output"></pre>
-        <div class="pane-head">Compiler / stderr <span class="hint">f2c, clang and wasm-ld diagnostics</span></div>
+        <div class="pane-head">Compiler / stderr <span class="hint">f2c, clang and wasm-ld diagnostics, and the program's stderr</span></div>
         <pre id="diagnostics" class="output"></pre>
       </section>
     </main>

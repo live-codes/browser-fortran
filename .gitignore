@@ -1,2 +1,9 @@
-# Written by `npm run assets` — the Clang runtime the page fetches. ~28 MB.
+# Written by `npm run assets`, and fetched by the page. Together, ~29 MB.
+public/fortran/
 public/clang/
+
+# The package's own install, for its tests and its IIFE build.
+packages/fortran-wasm/node_modules/
+
+# Built outputs that are committed on purpose are not listed here: the package's
+# assets/ and dist/ are part of it.

@@ -14,11 +14,15 @@ Fortran 77 source
   → WASI preview 1 module                    instantiated and run in this tab
 ```
 
-The browser host is `@live-codes/clang-wasm`'s runtime, through the low-level `/toolchain` entry
-added to that package for this spike (§8). It is the same Clang/LLD/WASI half that
-`@wasm-idle/llvm-core/clang` provides — the package is built on it — but taking it from the package
+The browser host is `@live-codes/clang-wasm`'s runtime, through the low-level `/toolchain` entry added
+to that package for this spike (§8). It is the same Clang/LLD/WASI half that
+`@wasm-idle/llvm-core/clang` provides — that package is built on it — but taking it from the package
 means one runtime shared with C, C++ and Objective-C instead of a second one beside them, and it is
 where the self-hosted assets and their receipts live.
+
+The Fortran half is now a package too, `@live-codes/fortran-wasm`, in `packages/fortran-wasm`. It
+holds the frontend, the runtime library, the compat shim and the link line; the page in `public/` is a
+harness around it.
 
 Every cheaper-looking alternative fails for a browser playground:
 
@@ -129,36 +133,66 @@ under **no** cross-origin isolation.
 
 | snippet | result | f2c | compile + link | run |
 | --- | --- | --- | --- | --- |
-| `PRINT *, 'Hello from Fortran!'` | `Hello from Fortran!` / `Compiled and run in your browser, with no server.` | 22 ms | 932 ms | 6 ms |
-| `DO 10 I = 1, 10` + `SQ = I * I` | ten `n= N  n squared= N` lines, then `Done.` | 6 ms | 211 ms | 8 ms |
-| `REAL X(5)` + `DATA X /…/` + mean | `Sum  =   15.` / `Mean =   3.` | 3 ms | 162 ms | 4 ms |
-| `READ *, A` / `READ *, B`, stdin `20\n22` | `Sum =  42` | 4 ms | 169 ms | 7 ms |
+| `PRINT *, 'Hello from Fortran!'` | `Hello from Fortran!` / `Compiled and run in your browser, with no server.` | 26 ms | 1525 ms | 5 ms |
+| `DO 10 I = 1, 10` + `SQ = I * I` | ten `n= N  n squared= N` lines, then `Done.` | 7 ms | 479 ms | 4 ms |
+| `REAL X(5)` + `DATA X /…/` + mean | `Sum  =   15.` / `Mean =   3.` | 26 ms | 417 ms | 6 ms |
+| a `SUBROUTINE` and an `INTEGER FUNCTION` in the same file | `doubled: 42` / `tripled: 42` | 5 ms | 316 ms | 4 ms |
+| `READ *, A` / `READ *, B`, stdin `20\n22` | `Sum =  42` | 4 ms | 257 ms | 8 ms |
 | `DO 10` with no `10 CONTINUE` | `Error on line 7 of main.f: missing statement label 10` (f2c) | — | — | — |
 | `CALL NOSUCHSUB`, never defined | `wasm-ld: error: main.o: undefined symbol: nosuchsub_` | — | — | — |
-| `PROGRAM P` / `END` (minimal) | exit 0, no output | 22 ms | 1703 ms | 9 ms |
 
 The two failure rows are deliberately different shapes: a bad *program* is `f2c`'s to report, a bad
 *link* is `wasm-ld`'s, and both arrive in the tool's own words.
 
-`READ` is genuinely wired to stdin, which matters for competitive-programming-shaped programs.
+`READ` is genuinely wired to stdin, which matters for competitive-programming-shaped programs. File
+I/O works too, including a round trip — `OPEN`/`WRITE`/`CLOSE`, then `OPEN`/`READ` — which was
+checked while mapping the surface below, as were subroutines and functions in either order.
+
+### What does not work, and why
+
+Three things were probed and fail, all for the same root cause:
+
+| probe | result |
+| --- | --- |
+| `CALL GETARG(1, VALUE)` — argv | trap: `signature_mismatch:getarg_` |
+| `CALL EXIT(3)` — a non-zero exit code | trap: `signature_mismatch:exit_` |
+| `OPEN` a file that does not exist | trap: `signature_mismatch:err_` (after libf2c prints its own message) |
+
+All three are calls *into* the runtime library. `f2c` knows those routines by name only, so it cannot
+emit the interface `libf2c` was compiled with, and `wasm-ld` answers with a stub that traps instead of
+failing the link. It is the same class of failure as §3b's `undefined_weak:main`, one level up: there
+the linker stubbed a *missing* symbol, here it stubs a *mismatched* one.
+
+Two consequences worth stating plainly, because they shape the package's API:
+
+- **A Fortran program cannot read its own argv.** `GETARG` is the only way in, so `args` would be an
+  option that changes nothing a program can observe — except `IARGC()`, which does work (it takes no
+  arguments, so there is no signature to get wrong). There is deliberately no `args` option.
+- **`STOP n` exits 0**, with `STOP n statement executed` on stderr. That is libf2c's behaviour, not a
+  bug here, and it means a Fortran program has no easy way to report a failure status.
+
+A trap like this used to escape the driver as a rejection. It does not any more: it comes back as a
+result with `exitCode: null`, whatever the program managed to print, and a message that names the
+routine where it can (§8).
 
 ## 6. Payload
 
-The Clang set now comes from `@live-codes/clang-wasm`'s own assets (§8) rather than from the demo
-mirror, so two of these differ from what the mirror serves — and both differences matter:
+Both halves now ship inside their packages (§8) and are copied out with a command, so nothing is
+fetched from a third party at run time. Two of the Clang assets differ from what the demo mirror
+serves, and both differences matter:
 
 | asset | bytes | from |
 | --- | --- | --- |
-| `bin/clang.wasm.gz` | 15,721,977 | the package |
-| `bin/lld.wasm.gz` | 7,837,837 | the package |
-| `bin/sysroot.tar.gz` | **5,334,358** | the package — full libc++, not the pruned tree the mirror serves (5,059,892) |
-| `bin/memfs.wasm.gz` | **38,702** | the package — rebuilt, 4091 usable nodes, not the stock 1019 (18,974 bytes) |
-| `wasm-fortran/f2c.wasm.gz` | 225,632 | `seorii.page` |
-| `wasm-fortran/libf2c.a.gz` | 155,956 | `seorii.page` |
-| `wasm-fortran/f2c.h` | 4,707 | `seorii.page` |
-| `runtime-manifest.v1.json` | 876 | the package |
-| host JS (`@live-codes/clang-wasm` + `@wasm-idle/llvm-core/clang`) | ~239,459 | npm |
-| **total** | **~29.6 MB** | |
+| `clang/bin/clang.wasm.gz` | 15,721,977 | `@live-codes/clang-wasm` |
+| `clang/bin/lld.wasm.gz` | 7,837,837 | `@live-codes/clang-wasm` |
+| `clang/bin/sysroot.tar.gz` | **5,334,358** | `@live-codes/clang-wasm` — full libc++, not the pruned tree the mirror serves (5,059,892) |
+| `clang/bin/memfs.wasm.gz` | **38,702** | `@live-codes/clang-wasm` — rebuilt, 4091 usable nodes, not the stock 1019 (18,974 bytes) |
+| `fortran/f2c.wasm` | 636,297 | `@live-codes/fortran-wasm` (shipped raw; the mirror serves it gzipped at 225,632) |
+| `fortran/libf2c.a` | 461,120 | `@live-codes/fortran-wasm` (155,956 gzipped on the mirror) |
+| `fortran/f2c.h` | 4,707 | `@live-codes/fortran-wasm` |
+| `clang/runtime-manifest.v1.json` | 876 | `@live-codes/clang-wasm` |
+| host JS (both packages + `@wasm-idle/llvm-core` + the WASI shim) | ~245,000 | npm |
+| **total** | **~29.8 MB** | |
 
 The memfs difference is not cosmetic for Fortran. The stock memfs has 1019 usable nodes and the stock
 sysroot already consumes 978 of them, so this pipeline — `f2c.h`, `libf2c.a`, `libf2c_main.o`, the
@@ -195,18 +229,23 @@ unpack, not the fetch, and it happens once per page.
   CDN with no special headers. `@live-codes/clang-wasm` installs the `SharedArrayBuffer` stub itself;
   a language module on that package inherits it.
 - **`largeDownload: true`.** ~29 MB on first run.
-- **The `main.o` extraction (§3b) belongs in the language module** — it is ~25 lines of `ar` parsing
-  that exist solely because of this toolchain's linking behaviour, and it must travel with the pinned
-  assets it understands.
+- **The `main.o` extraction (§3b) lives in `@live-codes/fortran-wasm`** — it is ~25 lines of `ar`
+  parsing that exist solely because of this toolchain's linking behaviour, and it travels with the
+  pinned assets it understands. The same goes for the compat shim (§3c) and the link line.
 - **Take the compiler from `@live-codes/clang-wasm/toolchain`, not from `@wasm-idle/llvm-core`
   directly** (§8). A second `BrowserClangRuntime` is a second ~28 MB asset load and a second ~84 MB
   resident, and LiveCodes already has the first one for C/C++/Objective-C.
-- **Assets:** the Clang half is the package's problem solved — it ships the graph and pins the
-  receipts. The three `f2c`/`libf2c` files still come from `seorii.page`, a demo mirror, and belong
-  in `browser-compilers` (or a mirror we control) referenced from `vendors.ts`, pinned by hash.
-  Depending on `seorii.page` is fine for a spike and wrong for a product.
+- **Ship the Fortran half as `@live-codes/fortran-wasm`**, which is what this repository now does —
+  `createCompiler(options).run(code, stdin)`, the same shape as `@live-codes/clang-wasm`'s language
+  API, with the three assets and their receipts inside the package.
+- **Assets:** both halves are now packages that ship their own and pin the receipts, so the remaining
+  work is to publish them rather than to mirror `seorii.page`. A CDN copy is still worth doing —
+  `fortran-wasm-copy-assets` and `clang-wasm-copy-assets` write an `asset-receipts.json` beside the
+  copy for whoever serves it.
 
-## 8. What the package needed, and what it cost
+## 8. The two packages, and what they cost
+
+### `@live-codes/clang-wasm` gained a low-level entry
 
 `@live-codes/clang-wasm` runs C, C++ and Objective-C through `createCompiler(language).run(code, stdin)`.
 That API cannot express this pipeline: the entry point and the link line are decided inside its
@@ -215,9 +254,10 @@ drivers, and Fortran needs both to be its own — `MAIN__` plus libf2c's `main.o
 link line cannot carry libobjc.a"), so Fortran is the same problem a second time.
 
 So the package got a second, low-level entry rather than a change to the first one:
-`@live-codes/clang-wasm/toolchain`, exporting `createToolchain` and `compilerDiagnostics` and nothing
-else. It hands back the runtime plus `addFile`, `lock`, `captureCompilerOutput`, `runCommand` and
-`execute` — the plumbing, with no policy about which objects to link.
+`@live-codes/clang-wasm/toolchain`, exporting `createToolchain`, `compilerDiagnostics` and — added
+afterwards, when a driver needed them — `CLANG_DRIVER_DEFAULT_ARGS`. It hands back the runtime plus
+`addFile`, `lock`, `captureCompilerOutput`, `runCommand` and `execute`: the plumbing, with no policy
+about which objects to link.
 
 **It shares the runtime with `createCompiler`.** Both acquire from one pool keyed by asset source, so
 a page running C/C++ *and* Fortran pays for one ~28 MB load and one ~84 MB resident copy, and both
@@ -226,8 +266,7 @@ object; that identity is asserted in the package's tests.
 
 **Nothing existing changed.** `createCompiler`, `LANGUAGE_IDS` and `standardsFor` are untouched. The
 only edits to existing files were moving one private helper (`captureCompilerOutput`) from
-`compile.js` to `runtime.js` so that both entries could use it, and adding `compilerDiagnostics` to
-the new entry.
+`compile.js` to `runtime.js` so that both entries could use it, and adding the new exports.
 
 **Bundle size.** The language bundle `dist/clang-wasm.global.js` is **unchanged at 302,713 bytes**: the
 new entry is a separate subpath, so a consumer that does not import it does not pay for it. The
@@ -235,41 +274,92 @@ low-level entry gets its own IIFE, `dist/clang-wasm-toolchain.global.js` (290.8 
 `@live-codes/clang-wasm/iife/toolchain` for the classic workers LiveCodes' language modules run in.
 `npm run build:iife` writes both.
 
-Verified in the package's own suite: **32 tests pass**, seven of them new — two translation units
-compiled and linked with a hand-written link line, a WASI command run through `runCommand` that reads
-an input file and writes an output file, a failing command reporting its exit code and stderr rather
-than throwing, and the shared-runtime identity above.
+**One bug found here, in someone else's later change.** `CLANG_DRIVER_DEFAULT_ARGS` was added to the
+`browser` entry of `/toolchain` and not to the `node` one, so a Node consumer importing it got
+`SyntaxError: does not provide an export named` — which is exactly what happened to this package. The
+Node entry now exports it, a test asserts that both entries export the same names (a driver only ever
+sees the one its environment resolves, so nothing else would catch the drift), and both fixes went out
+in the published `0.2.0`. This package depends on `@live-codes/clang-wasm@^0.2.0` from the registry
+and its 17 tests pass against it with no dev link.
 
-One bug found on the way: the documented way to fetch the assets,
-`npx @live-codes/clang-wasm-copy-assets`, does not work — `npx` reads that as a *package* name, and
-the package is `@live-codes/clang-wasm`. It is
-`npx --package @live-codes/clang-wasm clang-wasm-copy-assets <dir>`. Fixed in the package's README,
-in the error message that tells users the same thing, and used by this repo's `npm run assets`.
+### `@live-codes/fortran-wasm` is new
+
+The Fortran half is now its own package, `packages/fortran-wasm`, in the same shape as
+`packages/clang-wasm` beside it: `createCompiler(options)` returning `{ language, dialect, run,
+dispose }`, assets and their receipts inside the package, a `fortran-wasm-copy-assets` bin for
+browsers, a Node and a browser entry, and an IIFE bundle at 299.3 KB for classic workers.
+
+It carries everything §3 taught: the compat shim for `fiprintf`/`__SIG_IGN`/`signal`/`tmpfile`, the
+`ar` extraction of libf2c's `main.o`, and the hand-written `wasm-ld` line that uses it. That knowledge
+was in the demo's driver; it belongs with the pinned assets it depends on, and the demo is now a
+harness that only renders what the package returns.
+
+Two things the package does that the demo's driver did not:
+
+- **A trap comes back as a result, not a rejection.** Calling `GETARG` used to throw out of `run()` and
+  out of the caller's `await`. It now returns `exitCode: null`, whatever the program printed, and a
+  message naming the trapping routine where the stack allows (§5).
+- **There is no `args` option.** §5 explains why: a program cannot read its argv, so passing one would
+  be an option with no observable effect. The probe that established this is the reason the option was
+  removed rather than shipped and documented.
+
+Verified in its own suite: **17 tests**, all real compiles in Node with no server — a program,
+subroutines and functions, a file round-trip, stdin, all three failure modes, the result shape, the
+shared toolchain, and that each shipped asset hashes to its receipt.
+
+### The other bug found on the way
+
+The documented way to fetch the assets, `npx @live-codes/clang-wasm-copy-assets`, does not work —
+`npx` reads that as a *package* name, and the package is `@live-codes/clang-wasm`. It is
+`npx --package @live-codes/clang-wasm clang-wasm-copy-assets <dir>`. Fixed in the package's README, in
+the error message that tells users the same thing, and used by this repository's `npm run assets`.
 
 ## 9. Reproducing the verification
 
 ```bash
-npm run assets              # copies the Clang runtime into public/clang/  (once)
+npm run assets              # copies both asset trees into public/  (once, ~29 MB)
+npm --prefix packages/fortran-wasm test           # 17 real compiles, no server
 npm start                   # → http://localhost:8127/   (no isolation — the default)
 npm run check               # syntax-check serve.js and public/main.js
 npm run start:isolation     # same page with COOP/COEP, to compare
-npm start -- --clang-wasm=<dir>/src   # use a different @live-codes/clang-wasm checkout
+npm start -- --fortran-wasm=<dir>/src
 ```
 
-`public/clang/` is generated and not committed; without it the page fails at the manifest fetch with
-the URL it tried. The package's `/toolchain` entry is not in the published `0.1.0`, so `serve.js`
-serves the package source from the checkout beside this repository at `/vendor/clang-wasm/`, which
-the import map names. Once the entry is published that mount and that import-map line both go away.
+`public/clang/` and `public/fortran/` are generated and not committed; without them the page fails at
+the first asset it fetches, naming the URL it tried. `@live-codes/clang-wasm@0.2.0` is published, so
+its half comes from jsDelivr and its assets from `clang-wasm-copy-assets`; `@live-codes/fortran-wasm`
+is not published yet, so `serve.js` mounts its source under `/vendor/` and the import map names that.
+When it is published, the mount and one import-map line go away and this repository gets simpler.
 
-Driven here with the `agent-browser` CLI against headless Chrome: select the example, click Run,
-and read `document.documentElement.dataset` (`status` / `runs` / `exitCode` / `toolchainMs` /
-`f2cMs` / `compileMs` / `execMs`) plus the `#output` and `#diagnostics` panes. Element ids are
-exposed as globals (`editor`, `run`, `stdin`, `output`, `diagnostics`, `examples`) so probes can
-avoid string literals — shells mangle quotes in native-command arguments.
+**One gotcha in the no-bundler setup**, worth knowing before debugging it as a toolchain fault:
 
-Note that `run` is the Run **button** element, not the driver function; probes click it and poll
-`dataset.runs`, because the driver's `run()` is module-scoped and not a global.
+- The runtime insists on absolute http(s) for its asset URLs, so a relative `baseUrl` is rejected —
+  which is why `serve.js`'s defaults are turned into absolute ones against the page before the page
+  ever sees them.
+
+And one that is now history, kept because it cost an hour and would cost the next person the same:
+for a while `/toolchain` re-exported `CLANG_DRIVER_DEFAULT_ARGS` from clang-wasm's `compile.js`, which
+imports `@wasm-idle/llvm-core/core/clang-profile`. That put a deep, easily-unmapped specifier on the
+path of *every* toolchain consumer, so a page that resolves its own specifiers had to map it or
+nothing ran at all — the failure mode was `Failed to resolve module specifier` at import time, with no
+compiler involved and no hint of the toolchain. 0.2.0 moved the constant into `clang-flags.js`, a leaf
+module with no imports, so the entry no longer reaches the four-language drivers: the bundle went from
+mentioning `clang-profile` to not containing the string at all, and it is 6.5 KB where the package's
+main entry is still 11.5 KB with the drivers in it.
+
+Driven here with the `agent-browser` CLI against headless Chrome: select the example, click Run, and
+read `document.documentElement.dataset` (`status` / `runs` / `exitCode` / `toolchainMs` /
+`translateMs` / `compileMs` / `runMs`) plus the `#output` and `#diagnostics` panes. Element ids are
+exposed as globals (`editor`, `run`, `stdin`, `output`, `diagnostics`, `examples`) so probes can avoid
+string literals — shells mangle quotes in native-command arguments.
+
+Note that `run` is the Run **button** element, not a function; probes click it and poll `dataset.runs`,
+because the driver's `run()` is module-scoped and not a global. One more probe hazard: an `eval` whose
+expression is object-literal-heavy is easy to get subtly wrong, and the failure is a bare
+`SyntaxError` rather than anything about the page.
 
 Asset inspection (§2, §3, §6) used a small `ar` parser and SHA-256 comparison over the downloaded
 bytes, plus `WebAssembly.Module.imports`/`exports` over the extracted `main.o`. The bundle probe in
-§4 was a substring/occurrence count over the minified host source.
+§4 was a substring/occurrence count over the minified host source. When the page looked broken and the
+server looked fine, walking the module graph over HTTP from the page's own entry — fetching each
+module and resolving its specifiers through the import map — found the unmapped one immediately.

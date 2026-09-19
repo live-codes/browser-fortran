@@ -4,7 +4,7 @@
  * It exists because `file://` cannot run ES modules or fetch the wasm assets.
  * Nothing else is needed: the page runs with NO cross-origin isolation.
  *
- *   node serve.js [port] [root] [--isolation] [--clang-wasm=<dir>]
+ *   node serve.js [port] [root] [--isolation] [--fortran-wasm=<dir>]
  *
  * `root` defaults to `public/` and is resolved against this file.
  *
@@ -12,11 +12,11 @@
  * would need. This pipeline is not threaded, so the headers are unnecessary;
  * see FINDINGS.md for why. The flag is kept so the difference can be shown.
  *
- * `--clang-wasm` points the `/vendor/clang-wasm/` mount at a checkout of
- * `@live-codes/clang-wasm`. The page builds on that package's low-level
- * `/toolchain` entry, which is not in the published 0.1.0, so during
- * development it is served from the checkout beside this repository. Once the
- * entry is published, drop the mount and point the import map at a CDN.
+ * `--fortran-wasm` points the `/vendor/fortran-wasm/` mount at a checkout of
+ * the package in `packages/`, which is not published yet. Once it is, the mount
+ * and its import-map line both go away. The other half, `@live-codes/clang-wasm`,
+ * *is* published - the import map names it on jsDelivr, so there is no mount for
+ * it and nothing to configure for local development.
  */
 
 import { createServer } from 'node:http';
@@ -31,14 +31,16 @@ const positional = argv.filter((arg) => !arg.startsWith('-'));
 
 const PORT = Number(positional[0] ?? 8127);
 const ROOT = resolve(HERE, positional[1] ?? 'public');
-const CLANG_WASM_DIR = resolve(
-  HERE,
-  argv.find((arg) => arg.startsWith('--clang-wasm='))?.slice('--clang-wasm='.length) ||
-    '../clang-wasm/packages/clang-wasm/src',
-);
+
+const option = (name, fallback) => {
+  const value = argv.find((arg) => arg.startsWith(`--${name}=`))?.slice(name.length + 3);
+  return resolve(HERE, value || fallback);
+};
+
+const FORTRAN_WASM_DIR = option('fortran-wasm', 'packages/fortran-wasm/src');
 
 // Longest prefix first, so a mount cannot be shadowed by a directory of the same name.
-const MOUNTS = [['/vendor/clang-wasm/', CLANG_WASM_DIR]];
+const MOUNTS = [['/vendor/fortran-wasm/', FORTRAN_WASM_DIR]];
 
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -106,7 +108,7 @@ server.listen(PORT, () => {
   console.log(
     `serving ${ROOT} — cross-origin isolation ${isolation ? 'ON (--isolation)' : 'off (not needed)'}`,
   );
-  console.log(`mounting /vendor/clang-wasm/ from ${CLANG_WASM_DIR}`);
-  console.log('the f2c/Clang toolchain comes from a runtime mirror on first run');
+  console.log(`mounting /vendor/fortran-wasm/ from ${FORTRAN_WASM_DIR}`);
+  console.log('@live-codes/clang-wasm comes from jsDelivr; the toolchain comes from ./fortran/ and ./clang/');
   console.log('press Ctrl+C to stop');
 });

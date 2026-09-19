@@ -1,0 +1,50 @@
+{
+  "name": "@live-codes/fortran-wasm",
+  "version": "0.1.0",
+  "description": "Run Fortran in the browser or in Node, on f2c and Clang compiled to WebAssembly",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": {
+      "node": "./src/index.node.js",
+      "browser": "./src/index.js",
+      "default": "./src/index.js"
+    },
+    "./iife": "./dist/fortran-wasm.global.js"
+  },
+  "bin": {
+    "fortran-wasm-copy-assets": "./bin/copy-assets.mjs"
+  },
+  "files": [
+    "src",
+    "bin",
+    "scripts",
+    "dist",
+    "assets",
+    "THIRD-PARTY-NOTICES.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "fetch:assets": "node scripts/fetch-assets.mjs",
+    "build:iife": "node scripts/build-iife.mjs",
+    "test": "node --test \"test/*.test.js\""
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  },
+  "dependencies": {
+    "@live-codes/clang-wasm": "^0.2.0"
+  },
+  "keywords": [
+    "fortran",
+    "fortran77",
+    "f2c",
+    "wasm",
+    "webassembly",
+    "clang",
+    "compiler",
+    "playground"
+  ]
+}
