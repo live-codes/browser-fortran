@@ -7,11 +7,12 @@ import { createCompiler } from '@live-codes/fortran-wasm';
  * and the timings the browser probes read back - so everything about compiling Fortran lives in one
  * place, and a LiveCodes language module would use the same package.
  *
- * The toolchain has two halves and so two asset trees:
- *   - `/fortran/` - f2c, libf2c and the header, written by `fortran-wasm-copy-assets`
- *   - `/clang/`   - Clang, LLD, memfs and the sysroot, written by `clang-wasm-copy-assets`
- * Both default to this page's own origin and can be pointed elsewhere with `?fortranBaseUrl=` and
- * `?clangBaseUrl=`.
+ * The toolchain has two halves, and each package ships its own wasm. Both are fetched from jsDelivr,
+ * straight out of the package that publishes them:
+ *   - `@live-codes/fortran-wasm@0.1.0/assets/` - f2c, libf2c and the header
+ *   - `@live-codes/clang-wasm@0.2.0/assets/`   - Clang, LLD, memfs and the sysroot
+ * Each can be pointed somewhere else with `?fortranBaseUrl=` and `?clangBaseUrl=` - at a mirror of
+ * our own, say, or a directory `*-copy-assets` wrote.
  */
 
 const EXAMPLES = [
@@ -102,8 +103,14 @@ function resolveBaseUrl(param, fallback) {
   return { baseUrl: absolute, isOverride: override !== '' };
 }
 
-const fortranMirror = resolveBaseUrl('fortranBaseUrl', '/fortran/');
-const clangMirror = resolveBaseUrl('clangBaseUrl', '/clang/');
+const fortranMirror = resolveBaseUrl(
+  'fortranBaseUrl',
+  'https://cdn.jsdelivr.net/npm/@live-codes/fortran-wasm@0.1.0/assets/',
+);
+const clangMirror = resolveBaseUrl(
+  'clangBaseUrl',
+  'https://cdn.jsdelivr.net/npm/@live-codes/clang-wasm@0.2.0/assets/',
+);
 
 const el = {
   editor: document.getElementById('editor'),

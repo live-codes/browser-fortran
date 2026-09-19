@@ -179,6 +179,21 @@ npx --package @live-codes/clang-wasm  clang-wasm-copy-assets  public/clang
 The Fortran half is ~1.1 MB; the Clang half is ~28 MB. Both write an `asset-receipts.json` next to
 what they copy, so whoever serves it can verify it at the CDN or in a build.
 
+**Or nothing at all.** Both packages ship their assets, so any CDN that serves the package serves the
+wasm with it, and a base URL can point straight at them:
+
+```js
+const compiler = await createCompiler({
+    baseUrl: 'https://cdn.jsdelivr.net/npm/@live-codes/fortran-wasm@0.1.0/assets/',
+    clangBaseUrl: 'https://cdn.jsdelivr.net/npm/@live-codes/clang-wasm@0.2.0/assets/'
+});
+```
+
+That is what the `browser-fortran` demo does — two files, no install, ~29 MB fetched on first run. The
+loaders still verify every byte against their receipts, so a CDN that mangles one (by serving a `.gz`
+file with `Content-Encoding: gzip` and letting the client decompress it, say) fails loudly instead of
+quietly.
+
 Every asset either half reads is checked against a pinned SHA-256 receipt before it is used. The
 Fortran receipts are in `src/asset-receipts.js`; the Clang ones are `@live-codes/clang-wasm`'s.
 

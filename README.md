@@ -29,22 +29,27 @@ Objective-C languages it already runs — one ~28 MB load, one ~84 MB resident, 
 ## Demo
 
 ```bash
-npm run assets     # copies both asset trees into public/  (once, ~29 MB)
 npm start          # → http://localhost:8127/
 ```
+
+There is nothing to install and nothing to copy: the compiler is a published package, its Clang is a
+published package, and both ship their wasm. `public/` is two files — an `index.html` with a one-entry
+import map and a `main.js` that drives the compiler — and everything else is fetched from jsDelivr on
+first use. ~29 MB, once, in about 21 seconds cold.
 
 Pick an example (or type your own), press **Run** — or `Ctrl`/`Cmd` + `Enter` in the editor. Program
 output appears in the right pane, diagnostics below it, and `READ` takes what is in the stdin box.
 
-A static server is required, because `file://` cannot run ES modules or fetch the wasm assets — but it
-needs no special headers, and `npm start` is a plain file server.
+A static server is required, because `file://` cannot run ES modules — but it needs no special
+headers, and `npm start` is a plain file server.
 
-There is no bundler and no build step. `public/index.html` uses an import map: `@live-codes/clang-wasm`
-comes from jsDelivr, and `@live-codes/fortran-wasm` is mounted from `packages/` by `serve.js` because it
-is not published yet. That mount, and one import-map line, go away when it is.
+The Clang half arrives through `@live-codes/fortran-wasm`'s own dependency on `@live-codes/clang-wasm`,
+which jsDelivr rewrites to an absolute URL — the same URL a page would map by hand, so anything else
+using that entry shares one module instance, one runtime and one lock with it. Nothing under `public/`
+mentions `@live-codes/clang-wasm` at all.
 
-The two `0.2.0` pins — in the import map and in `npm run assets` — have to agree: the runtime comes
-from the CDN and the assets from the copy, and the receipts are that version's.
+Point either half somewhere else — a mirror we control, or a directory `*-copy-assets` wrote — with
+`?fortranBaseUrl=` and `?clangBaseUrl=`.
 
 ## What you get
 
@@ -90,18 +95,20 @@ Every row below was run through the page in headless Chrome **with isolation off
 
 | program | result | f2c | compile + link | run |
 | --- | --- | --- | --- | --- |
-| Hello world | `Hello from Fortran!` / `Compiled and run in your browser, with no server.` | 10 ms | 796 ms | 3 ms |
-| `DO 10 I = 1, 10` loop | ten `n= NN  n squared= NNN` lines, then `Done.` | 4 ms | 346 ms | 2 ms |
-| Arrays, `DATA`, `REAL` | `Sum  =   15.` / `Mean =   3.` | 4 ms | 207 ms | 6 ms |
-| A subroutine and a function | `doubled: 42` / `tripled: 42` | 3 ms | 129 ms | 1 ms |
-| `READ *, A` with stdin `20` / `22` | `Enter two integers, one per line:` / `Sum =  42` | 1 ms | 77 ms | 3 ms |
+| Hello world | `Hello from Fortran!` / `Compiled and run in your browser, with no server.` | 14 ms | 781 ms | 3 ms |
+| `DO 10 I = 1, 10` loop | ten `n= NN  n squared= NNN` lines, then `Done.` | 4 ms | 291 ms | 2 ms |
+| Arrays, `DATA`, `REAL` | `Sum  =   15.` / `Mean =   3.` | 3 ms | 189 ms | 4 ms |
+| A subroutine and a function | `doubled: 42` / `tripled: 42` | 3 ms | 180 ms | 3 ms |
+| `READ *, A` with stdin `20` / `22` | `Enter two integers, one per line:` / `Sum =  42` | 3 ms | 177 ms | 5 ms |
 | unterminated `DO` loop | `Error on line 7 of main.f: missing statement label 10` | — | — | — |
 
 The package's own suite covers more of that surface in Node — a file round-trip, a program that trips
 a trap, the result shape, and the shared toolchain — with `npm --prefix packages/fortran-wasm test`.
 
-Toolchain load: **~7 s**, once per page, even from a local origin — it is dominated by decompressing
-44 MB of clang and the 19 MB sysroot, not by the network.
+Toolchain load: **~21 s cold** — ~29 MB over the wire from jsDelivr, then 44 MB of clang and the 19 MB
+sysroot to decompress. On a repeat visit it is a few seconds, and that remainder is the decompression
+rather than the network: with the same assets served from localhost it measured ~7 s. It happens once
+per page.
 
 ## Limitations
 
@@ -113,7 +120,8 @@ Toolchain load: **~7 s**, once per page, even from a local origin — it is domi
   (a missing file on `OPEN`, say) end the program with a WebAssembly trap, because `f2c` cannot pass
   the interface `libf2c` was compiled with. It is reported rather than thrown. One consequence is that
   **a Fortran program cannot read its own argv**, so there is deliberately no `args` option.
-- **~29 MB on first run,** plus ~7 s to unpack. It works on a laptop; it is not a small download.
+- **~29 MB on first run,** and ~21 s to fetch and unpack it. It works on a laptop; it is not a small
+  download.
 - **~0.3–1.5 s to compile**, dominated by clang on the generated C. Fine for a playground; noticeable
   in a tight edit-run loop.
 - **stdin is all-or-nothing per run.** The stdin box is read once when the program starts.
@@ -123,28 +131,24 @@ Toolchain load: **~7 s**, once per page, even from a local origin — it is domi
 ## Layout
 
 ```
-packages/fortran-wasm/   @live-codes/fortran-wasm — the compiler, its tests, its own README
+packages/fortran-wasm/   @live-codes/fortran-wasm — the published compiler, its tests, its own README
 public/index.html        the harness page (examples, stdin, output, diagnostics, import map)
 public/main.js           the harness: create a compiler, render a result, expose the timings
-public/fortran/          f2c, libf2c and the header, written by `fortran-wasm-copy-assets`
-public/clang/            Clang, LLD, memfs and the sysroot, written by `clang-wasm-copy-assets`
-serve.js                 static server: MIME types, caching, --isolation, the /vendor mount
+serve.js                 static server: MIME types, caching, --isolation
 FINDINGS.md              the spike log: what was verified, what broke, what it means
 ```
 
-There is no bundler. `packages/fortran-wasm/node_modules` exists only for that package's tests, and is
-ignored.
+`public/` is the whole demo. The wasm it runs on is in the packages, on jsDelivr, and
+`packages/fortran-wasm/node_modules` exists only for that package's tests.
 
 ## Verifying
 
 | what | command |
 | --- | --- |
-| fetch both asset trees | `npm run assets` |
 | serve the page | `npm start` → http://localhost:8127/ |
 | check syntax | `npm run check` |
 | serve with COOP/COEP instead | `npm run start:isolation` |
 | the package's own tests | `npm --prefix packages/fortran-wasm test` |
-| use a different fortran-wasm checkout | `npm start -- --fortran-wasm=<dir>/src` |
 
 The page exposes `document.documentElement.dataset` (`status`, `runs`, `exitCode`, `toolchainMs`,
 `translateMs`, `compileMs`, `runMs`) and its element ids as globals, so scripted checks can read state
@@ -152,11 +156,10 @@ and drive the page without string literals.
 
 ## Status
 
-Spike complete, and now shaped as the package LiveCodes would consume. `@live-codes/clang-wasm@0.2.0`
-is published and this page loads its runtime from jsDelivr; what is left is to publish
-`@live-codes/fortran-wasm`, drop the one remaining dev mount, mirror the three `f2c`/`libf2c` assets
-rather than depending on a demo host, and decide whether `fortran` ships on `f2c` (Fortran 77) or waits
-for a published LFortran.
+Spike complete. `@live-codes/clang-wasm@0.2.0` and `@live-codes/fortran-wasm@0.1.0` are both
+published, and this page loads the compiler from jsDelivr with no vendor mount and no build step —
+what is left is to mirror the wasm assets somewhere we control rather than copying them from npm on
+demand, and to decide whether `fortran` ships on `f2c` (Fortran 77) or waits for a published LFortran.
 
 ## License
 

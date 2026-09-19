@@ -167,11 +167,21 @@
       footer code { color: #a8b0bd; word-break: break-all; }
       .runtime { text-align: right; margin-left: auto; }
     </style>
+    <!--
+      The compiler, straight from the CDN — this page has no build step and no vendor mount.
+
+      `@live-codes/fortran-wasm`'s own dependency on `@live-codes/clang-wasm` is what pulls the
+      Clang half in: its ESM build imports `/npm/@live-codes/clang-wasm@0.2.0/toolchain/+esm` as an
+      absolute URL, so there is nothing to map for it and the one module instance is shared with
+      anything else on the page that used that entry.
+
+      The wasm assets come from jsDelivr too, out of the `assets/` directory of each package — both
+      halves are published, so this page is two files and a static server.
+    -->
     <script type="importmap">
       {
         "imports": {
-          "@live-codes/fortran-wasm": "/vendor/fortran-wasm/index.js",
-          "@live-codes/clang-wasm/toolchain": "https://cdn.jsdelivr.net/npm/@live-codes/clang-wasm@0.2.0/toolchain/+esm"
+          "@live-codes/fortran-wasm": "https://cdn.jsdelivr.net/npm/@live-codes/fortran-wasm@0.1.0/+esm"
         }
       }
     </script>

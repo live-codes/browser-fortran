@@ -2,21 +2,16 @@
  * A static server for this demo.
  *
  * It exists because `file://` cannot run ES modules or fetch the wasm assets.
- * Nothing else is needed: the page runs with NO cross-origin isolation.
+ * Nothing else is needed: the page runs with NO cross-origin isolation, and
+ * both packages come from a CDN, so there is no mount and nothing to configure.
  *
- *   node serve.js [port] [root] [--isolation] [--fortran-wasm=<dir>]
+ *   node serve.js [port] [root] [--isolation]
  *
  * `root` defaults to `public/` and is resolved against this file.
  *
  * `--isolation` adds COOP/COEP, which is what a threaded WebAssembly runtime
  * would need. This pipeline is not threaded, so the headers are unnecessary;
  * see FINDINGS.md for why. The flag is kept so the difference can be shown.
- *
- * `--fortran-wasm` points the `/vendor/fortran-wasm/` mount at a checkout of
- * the package in `packages/`, which is not published yet. Once it is, the mount
- * and its import-map line both go away. The other half, `@live-codes/clang-wasm`,
- * *is* published - the import map names it on jsDelivr, so there is no mount for
- * it and nothing to configure for local development.
  */
 
 import { createServer } from 'node:http';
@@ -31,16 +26,6 @@ const positional = argv.filter((arg) => !arg.startsWith('-'));
 
 const PORT = Number(positional[0] ?? 8127);
 const ROOT = resolve(HERE, positional[1] ?? 'public');
-
-const option = (name, fallback) => {
-  const value = argv.find((arg) => arg.startsWith(`--${name}=`))?.slice(name.length + 3);
-  return resolve(HERE, value || fallback);
-};
-
-const FORTRAN_WASM_DIR = option('fortran-wasm', 'packages/fortran-wasm/src');
-
-// Longest prefix first, so a mount cannot be shadowed by a directory of the same name.
-const MOUNTS = [['/vendor/fortran-wasm/', FORTRAN_WASM_DIR]];
 
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -57,15 +42,9 @@ const TYPES = {
 };
 
 function resolveRequest(urlPath) {
-  const mount = MOUNTS.find(([prefix]) => urlPath.startsWith(prefix));
-  const base = mount ? mount[1] : ROOT;
-  const rel = mount
-    ? urlPath.slice(mount[0].length)
-    : urlPath === '/'
-      ? 'index.html'
-      : urlPath.replace(/^\/+/, '');
-  const filePath = normalize(join(base, rel));
-  if (!filePath.startsWith(normalize(base))) {
+  const rel = urlPath === '/' ? 'index.html' : urlPath.replace(/^\/+/, '');
+  const filePath = normalize(join(ROOT, rel));
+  if (!filePath.startsWith(normalize(ROOT))) {
     return { error: 'Forbidden' };
   }
   return { filePath };
@@ -108,7 +87,6 @@ server.listen(PORT, () => {
   console.log(
     `serving ${ROOT} — cross-origin isolation ${isolation ? 'ON (--isolation)' : 'off (not needed)'}`,
   );
-  console.log(`mounting /vendor/fortran-wasm/ from ${FORTRAN_WASM_DIR}`);
-  console.log('@live-codes/clang-wasm comes from jsDelivr; the toolchain comes from ./fortran/ and ./clang/');
+  console.log('the compiler comes from jsDelivr; the wasm assets from ./fortran/ and ./clang/');
   console.log('press Ctrl+C to stop');
 });

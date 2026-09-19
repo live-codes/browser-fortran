@@ -20,9 +20,9 @@ to that package for this spike (§8). It is the same Clang/LLD/WASI half that
 means one runtime shared with C, C++ and Objective-C instead of a second one beside them, and it is
 where the self-hosted assets and their receipts live.
 
-The Fortran half is now a package too, `@live-codes/fortran-wasm`, in `packages/fortran-wasm`. It
-holds the frontend, the runtime library, the compat shim and the link line; the page in `public/` is a
-harness around it.
+The Fortran half is now a package too, `@live-codes/fortran-wasm` — in `packages/fortran-wasm`, and
+published. It holds the frontend, the runtime library, the compat shim and the link line; the page in
+`public/` is a harness around it and loads it from jsDelivr.
 
 Every cheaper-looking alternative fails for a browser playground:
 
@@ -177,9 +177,10 @@ routine where it can (§8).
 
 ## 6. Payload
 
-Both halves now ship inside their packages (§8) and are copied out with a command, so nothing is
-fetched from a third party at run time. Two of the Clang assets differ from what the demo mirror
-serves, and both differences matter:
+Both halves ship inside their packages (§8), and both packages are published, so every byte now comes
+from jsDelivr out of an `assets/` directory we control — nothing from a third party at run time, and
+nothing to copy first. Two of the Clang assets differ from what the old demo mirror served, and both
+differences matter:
 
 | asset | bytes | from |
 | --- | --- | --- |
@@ -203,10 +204,30 @@ rebuilt memfs removes that ceiling.
 Unlike the COBOL pipeline, the Clang runtime's own `sysroot.tar.gz` **is** downloaded here — COBOL
 overrides it with its own `c-sysroot.tar.gz`, and Fortran has no such override.
 
-Measured toolchain load: **~6.7 s** from a local origin, and **~23 s** on a warm HTTP cache from the
-CDN, **~143 s** in a freshly launched browser on a slow connection. Most of the local figure is
-decompressing 44 MB of clang and the 19 MB sysroot rather than the network — it is dominated by the
-unpack, not the fetch, and it happens once per page.
+Measured toolchain load: **~21 s** cold from jsDelivr — the ~29 MB above over the wire, then 44 MB of
+clang and the 19 MB sysroot to decompress — and a few seconds on a repeat visit. That remainder is the
+unpack rather than the fetch: with the same assets served from localhost it measured ~7 s. It happens
+once per page.
+
+### Serving the `.gz` assets from a CDN works, and it is not obvious why
+
+Four of the nine assets are *named* `.gz`, and the runtimes inflate them themselves. A CDN that decides
+to serve one with `Content-Encoding: gzip` would have the client transparently decompress it, and the
+loader would then try to inflate plain wasm — a failure that looks like a corrupt asset rather than a
+hosting configuration. So it was checked rather than assumed, on every asset either half fetches:
+
+| asset | in transit | gzip magic intact |
+| --- | --- | --- |
+| `bin/clang.wasm.gz` (15.7 MB) | `Content-Encoding: (none)` | yes |
+| `bin/lld.wasm.gz` (7.8 MB) | `(none)` | yes |
+| `bin/sysroot.tar.gz` (5.1 MB) | `(none)` | yes |
+| `bin/memfs.wasm.gz` (38 KB) | `(none)` | yes |
+| `runtime-manifest.v1.json` | `br` | n/a |
+| `f2c.wasm`, `libf2c.a`, `f2c.h` | `br` | n/a |
+
+jsDelivr compresses the files that are not already compressed and leaves the `.gz` ones alone, which is
+exactly what both loaders need. Every response also carries `Access-Control-Allow-Origin: *`, so a page
+on another origin can fetch them.
 
 ## 7. Recommendation for LiveCodes
 
@@ -317,19 +338,21 @@ the error message that tells users the same thing, and used by this repository's
 ## 9. Reproducing the verification
 
 ```bash
-npm run assets              # copies both asset trees into public/  (once, ~29 MB)
-npm --prefix packages/fortran-wasm test           # 17 real compiles, no server
 npm start                   # → http://localhost:8127/   (no isolation — the default)
 npm run check               # syntax-check serve.js and public/main.js
 npm run start:isolation     # same page with COOP/COEP, to compare
-npm start -- --fortran-wasm=<dir>/src
+npm --prefix packages/fortran-wasm test           # 17 real compiles, no server
 ```
 
-`public/clang/` and `public/fortran/` are generated and not committed; without them the page fails at
-the first asset it fetches, naming the URL it tried. `@live-codes/clang-wasm@0.2.0` is published, so
-its half comes from jsDelivr and its assets from `clang-wasm-copy-assets`; `@live-codes/fortran-wasm`
-is not published yet, so `serve.js` mounts its source under `/vendor/` and the import map names that.
-When it is published, the mount and one import-map line go away and this repository gets simpler.
+There is nothing to fetch or copy first. `public/` is two files — an import map with one entry, naming
+`@live-codes/fortran-wasm@0.1.0` on jsDelivr, and a `main.js` that drives it — and the ~29 MB of wasm
+comes from that package's `assets/` and `@live-codes/clang-wasm`'s, both published, both on the same
+CDN. Point either half elsewhere with `?fortranBaseUrl=` and `?clangBaseUrl=`.
+
+The Clang half is worth spelling out because it is invisible here: it arrives through
+`@live-codes/fortran-wasm`'s own `^0.2.0` dependency, which jsDelivr rewrites to an absolute URL — the
+same URL a page would map by hand, so the two share one module instance and one runtime. Nothing under
+`public/` mentions `@live-codes/clang-wasm` at all.
 
 **One gotcha in the no-bundler setup**, worth knowing before debugging it as a toolchain fault:
 
