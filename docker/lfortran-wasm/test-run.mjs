@@ -8,7 +8,7 @@ import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { CASES, stdinFor } from './corpus.mjs';
+import { CASES, EXPECT, stdinFor } from './corpus.mjs';
 // The package's loader, not a copy of it: the probe and the shipped package must be the same code.
 import { createCompiler } from '../../packages/lfortran-wasm/src/index.js';
 
@@ -27,21 +27,19 @@ let dumped = false;
 for (const [name, source] of Object.entries(CASES)) {
 	const { stdout, errors, exitCode, runMs } = await compiler.run(source, stdinFor(name));
 
-	const ok = exitCode === 0;
+	// The exit code alone is not enough: a program can run, exit 0 and print nothing, which is how a
+	// missing-output bug passed every earlier run of this corpus.
+	const expected = EXPECT[name] ?? {};
+	const missing = (expected.expect ?? []).filter((text) => !stdout.includes(text));
+	const forbidden = (expected.not ?? []).filter((text) => stdout.includes(text));
+	const ok = exitCode === 0 && missing.length === 0 && forbidden.length === 0;
 	if (ok) passed += 1;
 	console.log(`${ok ? 'OK  ' : 'FAIL'}  ${name}  (${Math.round(runMs)} ms)`);
 	if (stdout.trim()) console.log(`      ${stdout.trimEnd().split('\n').join('\n      ')}`);
-	if (!ok) {
-		if (errors) console.log(`      ${errors.trim().split('\n').slice(0, 8).join('\n      ')}`);
-		// LFortran prints the whole module to stdout when verification fails
-		// (asr_to_llvm.cpp: `v.module->print(os, nullptr); std::cout << os.str();`), so an invalid
-		// module shows up as stdout rather than being lost.
-		if (!dumped && stdout.includes('define ')) {
-			dumped = true;
-			const dump = join(OUT, 'invalid.ll');
-			await writeFile(dump, stdout);
-			console.log(`      (invalid IR written to ${dump})`);
-		}
+	if (missing.length) console.log(`      missing from stdout: ${JSON.stringify(missing)}`);
+	if (forbidden.length) console.log(`      should not be printed: ${JSON.stringify(forbidden)}`);
+	if (exitCode !== 0 && errors) {
+		console.log(`      ${errors.trim().split('\n').slice(0, 6).join('\n      ')}`);
 	}
 }
 

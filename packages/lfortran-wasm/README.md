@@ -65,13 +65,13 @@ form.
 
 | asset | raw | gzip | brotli |
 | --- | --- | --- | --- |
-| `wasm_run.wasm` | 70.75 MiB | 19.04 MiB | 12.90 MiB |
+| `wasm_run.wasm` | 63.70 MiB | 17.61 MiB | 11.87 MiB |
 | `wasm_run.js` | 0.54 MiB | 0.12 MiB | 0.10 MiB |
 | `wasm_run.data` | 0.17 MiB | 0.03 MiB | 0.02 MiB |
-| **total** | **71.46 MiB** | **19.19 MiB** | **13.02 MiB** |
+| **total** | **64.41 MiB** | **17.76 MiB** | **11.99 MiB** |
 
-The package ships the **gzip** (19.04 MiB) and decompresses it in the client with
-`DecompressionStream`. The raw file is never published: at 70.75 MiB it is past what a CDN will serve
+The package ships the **gzip** (17.61 MiB) and decompresses it in the client with
+`DecompressionStream`. The raw file is never published: at 63.70 MiB it is past what a CDN will serve
 for a package file. Brotli is smaller but browsers cannot decompress it from script —
 `DecompressionStream` supports only gzip and deflate — so it is left on the table.
 
@@ -84,24 +84,15 @@ ships as one much larger file.
 The artifact is produced by the Docker build in this repository at `docker/lfortran-wasm/`, which
 documents each decision at the point it is made. The short version:
 
-- **LFortran v0.65.0**, Emscripten 4.0.9, LLVM **22.1.8** for `emscripten-wasm32`. The LLVM version is
-  pinned deliberately: `pixi.toml` says `llvm = "*"`, so solving today gives LLVM 23, and LFortran
-  v0.65.0 does not build against it.
-- **Own entry point.** LFortran's wasm build only *emits* things — AST, ASR, WAT, C, C++, wasm bytes.
-  In a browser there is no linker subprocess to hand a binary to, so `wasm-run-main.cpp` compiles and
-  runs in-process through `FortranEvaluator`, which is what its own wasm-compatible tests use.
-- **`-s MAIN_MODULE=1`**, because the executor loads the program it just compiled with `dlopen`. No
-  `-pthread` and no `USE_PTHREADS` anywhere.
-- **One patch to LFortran**, in two `start_new_block` helpers: `getTerminator()` became
-  `getTerminatorOrNull()`. Modern LLVM changed `BasicBlock::getTerminator()` to *assume* a
-  well-formed block; under `NDEBUG` it returns the trailing instruction for a block that is not
-  terminated, so LFortran concluded blocks were already terminated and emitted no branches, producing
-  invalid IR (`does not have terminator`) for every program.
-- **The reported version is pinned to the clean tag**, because that patch makes the build tree dirty:
-  `build0.sh` runs `ci/version.sh`, which is `git describe --tags --dirty`, so the compiler called
-  itself `0.65.0-dirty` while the preloaded runtime `.mod` files said `0.65.0` — and LFortran refuses
-  to load a `.mod` from a different version, which breaks `open`, `use iso_fortran_env` and more.
-  There is a test for it.
+- **LFortran v0.66.0**, Emscripten 4.0.9, LLVM **22.1.8** for `emscripten-wasm32`. The LLVM version is
+  pinned because `pixi.toml` says `llvm = "*"`, and solving fresh picks a version LFortran is not
+  built against. 22.1.8 is the only 22.x the emscripten-forge channel publishes.
+- **No source patch, from v0.66.0.** Up to v0.65.0 the two `start_new_block` helpers called
+  `getTerminator()` as a test; LLVM changed that method to *assume* a well-formed block, so under
+  `NDEBUG` it returned the trailing instruction for a block that was not terminated. LFortran then
+  concluded blocks were already terminated, emitted no branches, and produced invalid IR
+  (`does not have terminator`) for every program. v0.66.0 no longer calls it that way, so the build is
+  upstream's source unmodified — and it is smaller for it: 63.70 MiB of wasm instead of 70.75.
 
 **`MAIN_MODULE=2` was measured and rejected.** Exporting only a curated list would drop the 43,098
 exported symbols that `MAIN_MODULE=1` carries — about 4.74 MiB of export section, roughly 7% of the
@@ -160,8 +151,28 @@ procedures and derived types, array sections, stdin, a compile error, and a prog
 `assets/` is produced by the build above, so a checkout without it skips rather than fails.
 
 The same loader and the same corpus are also driven against a real browser by
-`docker/lfortran-wasm/browser-test.html` (14/14) and in Node by `docker/lfortran-wasm/test-run.mjs`,
-which is how the browser path is verified rather than assumed.
+`docker/lfortran-wasm/browser-test.html` and in Node by `docker/lfortran-wasm/test-run.mjs`, which is
+how the browser path is verified rather than assumed. Both assert on the program's **output**, not just
+its exit code — the current score is 13/15, the two failures being the `print *`-inside-a-loop case
+described below, which they are there to catch.
+
+## Known limitation: `print *` inside a `do` loop prints nothing
+
+```fortran
+program p
+integer :: i
+do i = 1, 3
+   print *, i
+end do
+end program
+```
+
+This produces **no output at all** — silently, with exit code 0 and no diagnostic. `write (*, '(…)')`
+in the same loop works, and `print *` before or after a loop works, so the loop runs and stdout is
+captured; it is this combination. Confirmed on LFortran v0.65.0 and v0.66.0, with LLVM 22.1.8 and
+23.1.2, and with and without the `getTerminator` patch — it is an upstream codegen bug, not a build
+configuration. The probe corpus (`docker/lfortran-wasm/test-run.mjs`) asserts on stdout and fails these
+cases, so it cannot regress unnoticed.
 
 ## Behaviour worth knowing
 

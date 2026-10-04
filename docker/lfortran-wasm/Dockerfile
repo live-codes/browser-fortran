@@ -14,7 +14,10 @@
 
 FROM debian:bookworm-slim
 
-ARG LFORTRAN_REF=v0.65.0
+# The LFortran release to build. v0.66.0 is the first release that does not call `getTerminator()` as
+# a test (see build-in-container.sh), so it needs no source patch; from it the build is upstream's
+# source unmodified. It is also smaller: 63.70 MiB of wasm, 17.61 MiB gzipped, against 70.75 / 19.04.
+ARG LFORTRAN_REF=v0.66.0
 
 # g++ is for `wasm-build0.sh`, which builds a *native* LFortran to generate the runtime `.mod` files
 # that the wasm build preloads. The wasm-build pixi environment has the cross toolchain but no host
@@ -45,4 +48,7 @@ RUN pixi install -e wasm-host --platform emscripten-wasm32
 # the evaluator in-process. See that file for the details.
 COPY build-in-container.sh /build.sh
 COPY wasm-run-main.cpp /wasm-run-main.cpp
+# Builds a different LFortran ref with the same toolchain, to separate our build configuration from
+# LFortran itself: docker run ... <image> bash /try-newer-ref.sh v0.66.0
+COPY try-newer-ref.sh /try-newer-ref.sh
 CMD ["bash", "/build.sh"]

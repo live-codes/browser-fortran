@@ -1,6 +1,6 @@
 {
   "name": "@live-codes/lfortran-wasm",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Run modern Fortran in the browser or in Node, on LFortran's LLVM backend compiled to WebAssembly",
   "type": "module",
   "license": "MIT",

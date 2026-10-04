@@ -130,9 +130,39 @@ print *, i
 x = 3.5
 print *, x
 `,
+	// Regression guard: list-directed print inside a do loop printed nothing, silently, with exit code
+	// 0 — the kind of failure an exit-code-only assertion cannot see.
+	'print inside a loop': `program p
+integer :: i
+do i = 1, 3
+   print *, i
+end do
+end program
+`,
 };
 
 // Input fed to the one case that reads stdin, keyed by case name.
+// What each program must and must not print. Asserting only on the exit code let a case that printed
+// nothing pass as OK, so these are checked too.
+export const EXPECT = {
+	'hello (free form)': { expect: ['hello from LFortran'] },
+	'DO loop': { expect: ['n = 1', 'n squared = 100'] },
+	'arrays, DATA, REAL': { expect: ['Sum', 'Mean', '15.0000000'] },
+	'subroutine and function': { expect: ['doubled: 42', 'tripled: 42'] },
+	'F90 declarations': { expect: ['1 1.5000000000000000 hi'] },
+	'MODULE + USE': { expect: ['from a module'] },
+	'derived type': { expect: ['1.00000000 2.00000000'] },
+	'ALLOCATABLE': { expect: ['6.00000000'] },
+	// f2c compiled this, ran it, exited 0 and printed all four elements.
+	'array section A(2:3)': { expect: ['20.0000000', '30.0000000'], not: ['10.0000000', '40.0000000'] },
+	'whole-array arithmetic': { expect: ['2.00000000 2.00000000 2.00000000'] },
+	'SUM intrinsic': { expect: ['6.00000000'] },
+	'READ from stdin': { expect: ['Sum =  42'] },
+	'statements, no program unit': { expect: ['5'] },
+	'statements, implicit program': { expect: ['3.50000000'] },
+	'print inside a loop': { expect: ['1', '2', '3'] },
+};
+
 export const STDIN = {
 	'READ from stdin': '20\n22\n',
 };
