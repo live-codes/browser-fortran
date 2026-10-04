@@ -38,6 +38,48 @@ else
     pixi run -e wasm-build ./build0.sh
 fi
 
+# --- the reported version must not be "dirty" -----------------------------------------------------
+#
+# build0.sh runs ci/version.sh, which is `git describe --tags --dirty`, and writes the result to the
+# `version` file that CMake reads. Our getTerminator patch makes the tree dirty, so the compiler
+# reports "0.65.0-dirty" — while the runtime .mod files preloaded from wasm-build0.sh were generated
+# by the unpatched native build and say "0.65.0". LFortran refuses to load a .mod written by a
+# different version, so every program that loads a runtime module fails:
+#
+#   Incompatible format: LFortran Modfile was generated using version '0.65.0', but current
+#   LFortran version is '0.65.0-dirty'
+#
+# That is `open`/`newunit`, `use iso_fortran_env` and more. Stripping only the -dirty suffix keeps any
+# "0.65.0-37-g3878937f" style part intact, so the value still matches what a clean build of the same
+# commit would produce. The patch itself is documented below rather than hidden in the version.
+# Only rewritten when it actually changes: `sed -i` touches the file even when the substitution is a
+# no-op, and CMake re-runs configure_file when the input moves, which rewrites config.h and rebuilds
+# the whole tree. This is what keeps a re-run down to the link.
+if grep -q -- '-dirty' version; then
+    sed -i 's/-dirty$//' version
+    echo "version pinned to $(cat version) so it matches the preloaded .mod files"
+fi
+
+# --- MAIN_MODULE=2 was measured and rejected -------------------------------------------------------
+#
+# MAIN_MODULE=2 exports only the names in EXPORTED_FUNCTIONS instead of every function. The MAIN_MODULE=1
+# build exports 43,098 symbols, about 4.74 MiB of export section, so that is the entire upside — roughly
+# 7% of the 70.75 MiB raw wasm, and less once compressed, since export names compress well.
+#
+# Against that, the list has to be exactly the set the *link* defines, and both easy ways to get it are
+# wrong:
+#   * from the runtime's sources — the public surface is larger than what is linked, so the link dies
+#     with "undefined exported symbol: _lcompilers_print_error";
+#   * from the side modules' imports — those GOT entries include symbols a side module resolves
+#     locally, so it over-approximates and hits the same fatal error.
+# Getting it right means deriving it from the built archive at link time, i.e. a CMake custom command
+# running nm over liblfortran_runtime_static.a before the link. And even then the importable surface is
+# frozen at build time: a user program needing a runtime function the link did not happen to pull in
+# would fail at dlopen, where MAIN_MODULE=1 simply works.
+#
+# Not worth 4.7 MiB of raw export section. Revisit only if the download size becomes the binding
+# constraint, with the derivation above.
+
 echo "=== 2/4  wasm-build0.sh (native LFortran -> runtime .mod files) ==="
 # Skipped when the .mod files are already installed, which they are when a previous run got as far
 # as this step: it rebuilds a whole native LFortran, and nothing about it depends on our changes.
@@ -99,7 +141,6 @@ if (EMSCRIPTEN AND NOT XEUS_LFORTRAN_WASM_BUILD)
     target_link_options(wasm_run PRIVATE
         "SHELL:-Oz -g0 -fexceptions -Wall -Wextra"
         "SHELL:-fwasm-exceptions"
-        "SHELL:-s MAIN_MODULE=1"
         "SHELL:-s ALLOW_MEMORY_GROWTH=1"
         "SHELL:-s MAXIMUM_MEMORY=4GB"
         "SHELL:-s WASM_BIGINT"
@@ -109,9 +150,20 @@ if (EMSCRIPTEN AND NOT XEUS_LFORTRAN_WASM_BUILD)
         # stay alive. The kernel can set it because the kernel *is* main.
         "SHELL:-s MODULARIZE=1"
         "SHELL:-s EXPORT_NAME=createLFortran"
-        "SHELL:-s EXPORTED_FUNCTIONS=['_run_fortran','_main','_malloc','_free']"
+        # An ES module with a default export, rather than a classic script defining a global. That is
+        # what allows one loader code path for a browser page, a worker and node — the alternative is
+        # a script tag in one and a `vm` context in another, which is where the realm mismatch came
+        # from that made a handled TypeError look like a raw WebAssembly.Table.set failure.
+        "SHELL:-s EXPORT_ES6=1"
         "SHELL:-s EXPORTED_RUNTIME_METHODS=['cwrap','FS']"
         "SHELL:-s FORCE_FILESYSTEM=1"
+    )
+
+    # MAIN_MODULE=2 was measured and rejected; see the note above step 2. MAIN_MODULE=1 exports every
+    # function, which is what lets a program compiled at run time import whatever it needs.
+    target_link_options(wasm_run PRIVATE
+        "SHELL:-s MAIN_MODULE=1"
+        "SHELL:-s EXPORTED_FUNCTIONS=['_run_fortran','_main','_malloc','_free']"
     )
 
     # Preload the runtime .mod files, so `use iso_c_binding` and friends resolve.
@@ -154,16 +206,22 @@ fi
 # LCOMPILERS_ASSERT, which NDEBUG removes, and the other (check_all_caches_done_properly) only
 # becomes *less* strict, so it cannot cause a failure. Not touching that header also keeps the
 # rebuild to two object files instead of most of the tree.
-git checkout -- src/libasr/codegen/asr_to_llvm.cpp src/libasr/codegen/llvm_utils.cpp
-sed -i 's|llvm::Instruction \*block_terminator = last_bb->getTerminator();|llvm::Instruction *block_terminator = last_bb->getTerminatorOrNull();|' \
-    src/libasr/codegen/asr_to_llvm.cpp src/libasr/codegen/llvm_utils.cpp
-for f in src/libasr/codegen/asr_to_llvm.cpp src/libasr/codegen/llvm_utils.cpp; do
-    if ! grep -q "getTerminatorOrNull" "$f"; then
-        echo "FATAL: the getTerminator patch did not apply to $f"
-        exit 1
-    fi
-done
-echo "patched getTerminator() -> getTerminatorOrNull() in both start_new_block helpers"
+# Applied only when absent: rewriting the files resets their timestamps and makes ninja rebuild both
+# translation units (asr_to_llvm.cpp is the slowest object in the tree) for no reason on a re-run.
+if grep -q "getTerminatorOrNull" src/libasr/codegen/asr_to_llvm.cpp; then
+    echo "getTerminator patch already applied, leaving those objects alone"
+else
+    git checkout -- src/libasr/codegen/asr_to_llvm.cpp src/libasr/codegen/llvm_utils.cpp
+    sed -i 's|llvm::Instruction \*block_terminator = last_bb->getTerminator();|llvm::Instruction *block_terminator = last_bb->getTerminatorOrNull();|' \
+        src/libasr/codegen/asr_to_llvm.cpp src/libasr/codegen/llvm_utils.cpp
+    for f in src/libasr/codegen/asr_to_llvm.cpp src/libasr/codegen/llvm_utils.cpp; do
+        if ! grep -q "getTerminatorOrNull" "$f"; then
+            echo "FATAL: the getTerminator patch did not apply to $f"
+            exit 1
+        fi
+    done
+    echo "patched getTerminator() -> getTerminatorOrNull() in both start_new_block helpers"
+fi
 
 # Make LLD's imported targets visible to src/libasr, which links `lldWasm lldCommon` by name. They are
 # directory-scoped, so importing them from src/bin — or from anywhere below the top level — leaves the

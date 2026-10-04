@@ -10,134 +10,69 @@
 	.case { margin-top: 0.75rem; }
 	.ok { color: #0a0; }
 	.fail { color: #c00; }
-	.stdout { white-space: pre-wrap; margin-left: 1.5rem; color: #333; }
-	.stderr { white-space: pre-wrap; margin-left: 1.5rem; color: #960; }
+	.output { white-space: pre-wrap; margin-left: 1.5rem; color: #333; }
+	.errors { white-space: pre-wrap; margin-left: 1.5rem; color: #960; }
 </style>
 </head>
 <body>
 <div id="summary" data-state="pending">loading the compiler…</div>
 <div id="results"></div>
 
-<!-- A classic script, because the module is built MODULARIZE=1 with EXPORT_ES6=0: it defines a
-     `createLFortran` global factory rather than exporting to a module. -->
-<script src="./out/wasm_run.js"></script>
 <script type="module">
-import { CASES, stdinFor } from './corpus.mjs';
+	// Same loader and same corpus as test-run.mjs. Nothing here is browser-specific apart from the DOM.
+	import { CASES, stdinFor } from './corpus.mjs';
+	// The package's loader, not a copy of it. Serving the repository root rather than this directory is
+	// what lets the page reach it.
+	import { createCompiler } from '../../packages/lfortran-wasm/src/index.js';
 
-const summary = document.getElementById('summary');
-const results = document.getElementById('results');
+	const summary = document.getElementById('summary');
+	const results = document.getElementById('results');
 
-const line = (tag, text, cls) => {
-	const div = document.createElement('div');
-	div.className = `case ${cls ?? ''}`;
-	div.textContent = `${tag}  ${text}`;
-	results.appendChild(div);
-	return div;
-};
+	const row = (text, cls) => {
+		const div = document.createElement('div');
+		if (cls) div.className = cls;
+		div.textContent = text;
+		results.appendChild(div);
+	};
 
-// Emscripten's print callback receives a line at a time with the newline consumed, so the separator
-// has to be put back.
-const capture = () => {
-	const lines = [];
-	return { lines, print: (text) => lines.push(text) };
-};
+	// Whatever happens, the page reports a verdict rather than hanging.
+	const verdict = (text, cls, detail) => {
+		summary.dataset.state = 'done';
+		summary.className = cls;
+		summary.textContent = text;
+		document.body.dataset.status = detail;
+	};
 
-// Setting Module.stdin does not work here: FS.createStandardStreams only creates a device for
-// /dev/stdin when `input` is set, and that path is behind emscripten's compile-time
-// expectToReceiveOnModule('stdin') check. /dev/stdin therefore symlinks to /dev/tty, whose fallback
-// would read the host's stdin — a prompt in a browser. Pointing fd 0 at a MEMFS file is deterministic
-// and per-run instead.
-const setStdin = (instance, text) => {
-	const FS = instance.FS;
-	FS.writeFile('/.stdin', new TextEncoder().encode(text));
-	const stream = FS.open('/.stdin', 'r');
-	if (FS.streams[0]) FS.close(FS.streams[0]);
-	FS.streams[0] = stream;
-};
+	try {
+		const startedAt = performance.now();
+		const compiler = await createCompiler({ baseUrl: new URL('./out/', import.meta.url) });
+		const loadMs = Math.round(performance.now() - startedAt);
 
-// The raw wasm is 70.75 MiB, past what a CDN will serve for a package file, so the shipped artifact
-// is the gzip (19.04 MiB) and the loader decompresses it here. DecompressionStream supports gzip and
-// deflate — not brotli — which is why gzip is what make-assets.mjs writes.
-// Passing `wasmBinary` keeps emscripten from fetching the uncompressed file itself.
-const loadWasmBinary = async () => {
-	const response = await fetch('./out/wasm_run.wasm.gz');
-	if (!response.ok) throw new Error(`fetching wasm_run.wasm.gz: ${response.status}`);
-	const decompressed = response.body.pipeThrough(new DecompressionStream('gzip'));
-	return { bytes: await new Response(decompressed).arrayBuffer(), fetched: Number(response.headers.get('content-length') ?? 0) };
-};
+		const failures = [];
+		let passed = 0;
+		const entries = Object.entries(CASES);
+		for (const [name, source] of entries) {
+			const { stdout, errors, exitCode, runMs } = await compiler.run(source, stdinFor(name));
 
-// Guards against a silent hang: whatever happens, the page reports a verdict.
-const fail = (message) => {
-	summary.dataset.state = 'done';
-	summary.className = 'fail';
-	summary.textContent = `FAILED: ${message}`;
-	document.body.dataset.status = `failed: ${message}`;
-	window.__lfortran = { failures: [message] };
-};
-
-try {
-	const stdout = capture();
-	const stderr = capture();
-	const createdAt = performance.now();
-	const binary = await loadWasmBinary();
-	const instance = await createLFortran({
-		locateFile: (path) => `./out/${path}`,
-		wasmBinary: binary.bytes,
-		print: stdout.print,
-		printErr: stderr.print,
-	});
-	const loadMs = Math.round(performance.now() - createdAt);
-	const runFortran = instance.cwrap('run_fortran', 'string', ['string']);
-
-	const failures = [];
-	let passed = 0;
-	const entries = Object.entries(CASES);
-	for (const [name, source] of entries) {
-		stdout.lines.length = 0;
-		stderr.lines.length = 0;
-		setStdin(instance, stdinFor(name));
-
-		let status;
-		try {
-			status = runFortran(source);
-		} catch (error) {
-			// A Fortran `exit()` surfaces as a thrown ExitStatus rather than a return value.
-			status = `1,threw: ${error.message ?? error}`;
+			const ok = exitCode === 0;
+			if (ok) passed += 1;
+			else failures.push(name);
+			row(`${ok ? 'OK  ' : 'FAIL'}  ${name}  (${Math.round(runMs)} ms)`, ok ? 'ok' : 'fail');
+			if (stdout.trim()) row(stdout.trimEnd(), 'output');
+			if (!ok && errors) row(errors.trim().slice(0, 600), 'errors');
 		}
 
-		const ok = status === '0';
-		if (ok) passed += 1;
-		else failures.push(name);
-		line(ok ? 'OK  ' : 'FAIL', name, ok ? 'ok' : 'fail');
-		if (stderr.lines.length) {
-			const err = document.createElement('div');
-			err.className = 'stderr';
-			err.textContent = stderr.lines.join('\n');
-			results.appendChild(err);
-		}
-		if (!ok) {
-			const why = document.createElement('div');
-			why.className = 'stderr';
-			why.textContent = status.slice(0, 400);
-			results.appendChild(why);
-		} else if (stdout.lines.length) {
-			const text = document.createElement('div');
-			text.className = 'stdout';
-			text.textContent = stdout.lines.join('\n');
-			results.appendChild(text);
-		}
+		verdict(
+			`${passed}/${entries.length} compiled and ran (compiler ready in ${loadMs} ms)`,
+			failures.length ? 'fail' : 'ok',
+			failures.length ? `failures: ${failures.join(', ')}` : 'all passed',
+		);
+		window.__lfortran = { passed, total: entries.length, failures, loadMs };
+	} catch (error) {
+		verdict(`FAILED: ${error?.message ?? error}`, 'fail', 'failed');
+		row(error?.stack ?? String(error), 'errors');
+		window.__lfortran = { failures: [String(error?.message ?? error)] };
 	}
-
-	summary.dataset.state = 'done';
-	summary.className = failures.length ? 'fail' : 'ok';
-	const downloaded = binary.fetched ? `, ${(binary.fetched / 1048576).toFixed(2)} MiB fetched` : '';
-	summary.textContent = `${passed}/${entries.length} compiled and ran (compiler ready in ${loadMs} ms${downloaded})`;
-	// Read by the browser-automation probe.
-	document.body.dataset.status = failures.length ? `failures: ${failures.join(', ')}` : 'all passed';
-	window.__lfortran = { passed, total: entries.length, failures, loadMs };
-} catch (error) {
-	fail(error?.stack ?? String(error));
-}
 </script>
 </body>
 </html>
