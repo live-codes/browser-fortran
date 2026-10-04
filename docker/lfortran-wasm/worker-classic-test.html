@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>LFortran in a classic worker</title>
+<style>
+	body { font: 13px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace; margin: 1rem; }
+	#summary { font-size: 1.4rem; font-weight: 700; }
+	#summary[data-state="pending"] { opacity: 0.5; }
+	.ok { color: #0a0; }
+	.fail { color: #c00; }
+</style>
+</head>
+<body>
+<div id="summary" data-state="pending">starting a classic worker…</div>
+<pre id="detail"></pre>
+
+<script>
+	// A classic (non-module) worker: no `type: 'module'` here either.
+	const summary = document.getElementById('summary');
+	const detail = document.getElementById('detail');
+	const lines = [];
+
+	const render = () => { detail.textContent = lines.join('\n'); };
+	const verdict = (text, cls, detailText) => {
+		summary.dataset.state = 'done';
+		summary.className = cls;
+		summary.textContent = text;
+		document.body.dataset.status = detailText;
+		window.__lfortran = { status: detailText };
+	};
+
+	const worker = new Worker('./worker-classic.js');
+
+	worker.onmessage = (event) => {
+		const { stage, failed, passed, total, failures, loadMs, scope, importScriptsResult } = event.data;
+		if (stage) {
+			lines.push(stage);
+			render();
+			summary.textContent = stage;
+			return;
+		}
+		if (failed) {
+			verdict(`FAILED: ${failed}`, 'fail', `failed: ${failed}`);
+			return;
+		}
+		lines.push(
+			`ran in a ${scope}`,
+			`compiler ready in ${loadMs} ms`,
+			`importScripts: ${importScriptsResult}`,
+		);
+		if (failures.length) lines.push(...failures.map((f) => `  ${f}`));
+		render();
+		verdict(
+			`${passed}/${total} compiled and ran`,
+			failures.length ? 'fail' : 'ok',
+			failures.length ? `failures: ${failures.length}` : 'all passed',
+		);
+	};
+
+	worker.onerror = (event) => {
+		verdict(`worker error: ${event.message}`, 'fail', `worker error: ${event.message}`);
+	};
+</script>
+</body>
+</html>

@@ -39,6 +39,28 @@ each time. Each run links its program as a separate wasm side module, which the 
 loads; those live for the lifetime of the loaded compiler, which is why a long-lived page should
 create one and reuse it rather than one per keystroke.
 
+### Classic workers
+
+A page or a module worker imports the package directly. A **classic** worker can use it too, because
+dynamic `import()` is available in classic workers as well — `await import(packageUrl)` works, verified
+with the corpus at 14/14.
+
+If a host can only use `importScripts`, there is a classic IIFE build for that:
+
+```js
+// in a classic (non-module) worker
+importScripts('https://cdn.jsdelivr.net/npm/@live-codes/lfortran-wasm/dist/lfortran-wasm.global.js');
+const compiler = await self.lfortranWasm.createCompiler();   // baseUrl optional; defaults to the CDN
+```
+
+It is 3.4 KB minified, because the loader has no dependencies. Pin the version in production.
+
+`importScripts` cannot load the emscripten glue, and this build exists because of it: the glue is an ES
+module (`EXPORT_ES6=1`), so `importScripts` reports a NetworkError for it. Measured against the same
+CDN in Chromium: another package's classic build loads, ours does not. The loader therefore reaches the
+glue with dynamic `import()`, which works from a classic worker, and only the loader needed a classic
+form.
+
 ## What it costs
 
 | asset | raw | gzip | brotli |
@@ -120,10 +142,12 @@ docker cp lfortran-wasm-run:/src/build-wasm/src/bin/wasm_run.js   docker/lfortra
 docker cp lfortran-wasm-run:/src/build-wasm/src/bin/wasm_run.wasm docker/lfortran-wasm/out/
 docker cp lfortran-wasm-run:/src/build-wasm/src/bin/wasm_run.data docker/lfortran-wasm/out/
 npm run copy-assets                                             # vendors + gzips into assets/
+npm run build:iife                                              # dist/lfortran-wasm.global.js
 ```
 
 `npm run copy-assets` prints a size and a SHA-256 receipt per asset, so a published artifact can be
-matched against a build.
+matched against a build. `build:iife` needs `esbuild`; in this repository it falls back to the copy the
+sibling package has installed.
 
 ## Tests
 

@@ -1,11 +1,12 @@
 {
   "name": "@live-codes/lfortran-wasm",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Run modern Fortran in the browser or in Node, on LFortran's LLVM backend compiled to WebAssembly",
   "type": "module",
   "license": "MIT",
   "exports": {
-    ".": "./src/index.js"
+    ".": "./src/index.js",
+    "./iife": "./dist/lfortran-wasm.global.js"
   },
   "bin": {
     "lfortran-wasm-copy-assets": "./bin/copy-assets.mjs"
@@ -13,6 +14,8 @@
   "files": [
     "src",
     "bin",
+    "scripts",
+    "dist",
     "assets",
     "THIRD-PARTY-NOTICES.md"
   ],
@@ -21,7 +24,11 @@
   },
   "scripts": {
     "copy-assets": "node bin/copy-assets.mjs",
+    "build:iife": "node scripts/build-iife.mjs",
     "test": "node --test \"test/*.test.js\""
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
   },
   "keywords": [
     "fortran",
