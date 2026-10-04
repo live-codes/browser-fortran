@@ -1,116 +1,139 @@
-import { createCompiler } from '@live-codes/fortran-wasm';
+import { createCompiler } from 'https://cdn.jsdelivr.net/npm/@live-codes/lfortran-wasm@0.1.0/src/index.js';
 
 /**
- * A page around `@live-codes/fortran-wasm`.
+ * A page around `@live-codes/lfortran-wasm`.
  *
- * The compiler is the package's. This file is the harness - examples, a Run button, two output panes,
- * and the timings the browser probes read back - so everything about compiling Fortran lives in one
- * place, and a LiveCodes language module would use the same package.
+ * The compiler is the package's, imported by URL from jsDelivr. This file is only the harness —
+ * examples, a Run button, two output panes, and the timings the browser probes read back — so
+ * everything about compiling Fortran lives in one place, and a LiveCodes language module would use
+ * the same package the same way.
  *
- * The toolchain has two halves, and each package ships its own wasm. Both are fetched from jsDelivr,
- * straight out of the package that publishes them:
- *   - `@live-codes/fortran-wasm@0.1.0/assets/` - f2c, libf2c and the header
- *   - `@live-codes/clang-wasm@0.2.0/assets/`   - Clang, LLD, memfs and the sysroot
- * Each can be pointed somewhere else with `?fortranBaseUrl=` and `?clangBaseUrl=` - at a mirror of
- * our own, say, or a directory `*-copy-assets` wrote.
+ * The package resolves its own wasm relative to itself, so no configuration is needed: the default
+ * below is what the published package serves. `?baseUrl=` points it at a mirror, or at the output of
+ * a local container build (`?baseUrl=/docker/lfortran-wasm/out/`).
  */
 
 const EXAMPLES = [
   {
     name: 'Hello world',
-    code: `      PROGRAM HELLO
-      PRINT *, 'Hello from Fortran!'
-      PRINT *, 'Compiled and run in your browser, with no server.'
-      END
+    code: `program hello
+print *, 'Hello from Fortran!'
+print *, 'Compiled and run in your browser, with no server.'
+end program
 `,
   },
   {
     name: 'DO loop',
-    code: `      PROGRAM SQUARES
-      INTEGER I, SQ
-      DO 10 I = 1, 10
-         SQ = I * I
-         PRINT *, 'n=', I, '  n squared=', SQ
-   10 CONTINUE
-      PRINT *, 'Done.'
-      END
+    code: `program squares
+integer :: i, sq
+do i = 1, 10
+   sq = i * i
+   print *, 'n =', i, '  n squared =', sq
+end do
+end program
 `,
   },
   {
-    name: 'Arrays, DATA and REAL arithmetic',
-    code: `      PROGRAM STATS
-      REAL X(5), TOTAL, AVG
-      INTEGER I
-      DATA X /1.0, 2.0, 3.0, 4.0, 5.0/
-      TOTAL = 0.0
-      DO 20 I = 1, 5
-         TOTAL = TOTAL + X(I)
-   20 CONTINUE
-      AVG = TOTAL / 5.0
-      PRINT *, 'Sum  = ', TOTAL
-      PRINT *, 'Mean = ', AVG
-      END
+    name: 'Whole-array arithmetic',
+    code: `program arrays
+real :: a(5), b(5)
+a = [1.0, 2.0, 3.0, 4.0, 5.0]
+b = a * 2.0
+print *, 'a      =', a
+print *, 'a * 2  =', b
+print *, 'sum(a) =', sum(a)
+print *, 'size(a)=', size(a)
+end program
 `,
   },
   {
-    name: 'Subroutines and functions',
-    code: `      PROGRAM CALLS
-      INTEGER TRIPLE, N
-      CALL DOUBLE(21, N)
-      PRINT *, 'doubled:', N
-      PRINT *, 'tripled:', TRIPLE(14)
-      END
-      SUBROUTINE DOUBLE(V, OUT)
-      INTEGER V, OUT
-      OUT = V * 2
-      END
-      INTEGER FUNCTION TRIPLE(V)
-      INTEGER V
-      TRIPLE = V * 3
-      END
+    name: 'Array sections (what f2c got wrong)',
+    code: `program slicing
+real :: a(4)
+a = [10.0, 20.0, 30.0, 40.0]
+print *, 'whole  =', a
+print *, 'A(2:3) =', a(2:3)
+print *, 'reversed=', a(4:1:-1)
+end program
+`,
+  },
+  {
+    name: 'Modules and derived types',
+    code: `module geometry
+implicit none
+type :: point
+   real :: x, y
+end type
+contains
+real function norm(p)
+   type(point), intent(in) :: p
+   norm = sqrt(p%x**2 + p%y**2)
+end function
+end module
+
+program main
+use geometry
+type(point) :: p
+p%x = 3.0
+p%y = 4.0
+print *, 'distance from the origin =', norm(p)
+end program
+`,
+  },
+  {
+    name: 'Allocatable arrays',
+    code: `program dynamic
+integer :: n, i
+integer, allocatable :: squares(:)
+n = 5
+allocate(squares(n))
+do i = 1, n
+   squares(i) = i * i
+end do
+print *, 'squares  =', squares
+print *, 'maxval   =', maxval(squares)
+print *, 'sum      =', sum(squares)
+deallocate(squares)
+end program
 `,
   },
   {
     name: 'READ from stdin',
-    code: `      PROGRAM ADDER
-      INTEGER A, B
-      PRINT *, 'Enter two integers, one per line:'
-      READ *, A
-      READ *, B
-      PRINT *, 'Sum = ', A + B
-      END
+    code: `program adder
+integer :: a, b
+print *, 'Enter two integers, one per line:'
+read *, a
+read *, b
+print *, 'Sum =', a + b
+end program
 `,
   },
   {
     name: 'A compile error (shown as diagnostics)',
-    code: `      PROGRAM BROKEN
-      INTEGER I, TOTAL
-      TOTAL = 0
-      DO 10 I = 1, 3
-         TOTAL = TOTAL + I
-      PRINT *, 'Total = ', TOTAL
-      END
+    code: `program broken
+integer :: i, total
+total = 0
+do i = 1, 3
+   total = total + i
+print *, 'Total =', total
+end program
 `,
   },
 ];
 
-function resolveBaseUrl(param, fallback) {
-  const override = (new URLSearchParams(location.search).get(param) ?? '').trim();
+function resolveBaseUrl() {
+  const override = (new URLSearchParams(location.search).get('baseUrl') ?? '').trim();
+  const fallback = 'https://cdn.jsdelivr.net/npm/@live-codes/lfortran-wasm@0.1.0/assets/';
   const base = override === '' ? fallback : override;
-  // The compiler requires an absolute http(s) asset URL, so a relative one is resolved against the
-  // page - which is what makes the same-origin defaults work.
-  const absolute = new URL(base.endsWith('/') ? base : `${base}/`, location.href).href;
-  return { baseUrl: absolute, isOverride: override !== '' };
+  // The loader needs an absolute URL for its assets, so a relative override is resolved against the
+  // page — which is what makes a same-origin mirror like /docker/lfortran-wasm/out/ work.
+  return {
+    baseUrl: new URL(base.endsWith('/') ? base : `${base}/`, location.href).href,
+    isOverride: override !== '',
+  };
 }
 
-const fortranMirror = resolveBaseUrl(
-  'fortranBaseUrl',
-  'https://cdn.jsdelivr.net/npm/@live-codes/fortran-wasm@0.1.0/assets/',
-);
-const clangMirror = resolveBaseUrl(
-  'clangBaseUrl',
-  'https://cdn.jsdelivr.net/npm/@live-codes/clang-wasm@0.2.0/assets/',
-);
+const mirror = resolveBaseUrl();
 
 const el = {
   editor: document.getElementById('editor'),
@@ -124,17 +147,13 @@ const el = {
   stdin: document.getElementById('stdin'),
   output: document.getElementById('output'),
   diagnostics: document.getElementById('diagnostics'),
-  fortranUrl: document.getElementById('fortran-url'),
-  fortranOverride: document.getElementById('fortran-override'),
-  clangUrl: document.getElementById('clang-url'),
-  clangOverride: document.getElementById('clang-override'),
+  baseUrl: document.getElementById('base-url'),
+  baseOverride: document.getElementById('base-override'),
 };
 
-// The browser probes drive the page by element id rather than by evaluating
-// string literals, which some shells mangle when passing arguments.
+// The browser probes drive the page by element id rather than by evaluating string literals, which
+// some shells mangle when passing arguments.
 Object.assign(window, el);
-
-const ANSI = /\x1B\[[0-9;]*m/g;
 
 let compiler = null;
 let running = false;
@@ -156,11 +175,6 @@ function append(node, text) {
   node.scrollTop = node.scrollHeight;
 }
 
-/** The compiler colours its diagnostics; the pane renders plain text, so strip it. */
-function appendDiagnostics(text) {
-  append(el.diagnostics, String(text).replace(ANSI, ''));
-}
-
 function clearOutput() {
   el.output.replaceChildren();
   el.diagnostics.replaceChildren();
@@ -172,24 +186,20 @@ function loadExample(index) {
   el.examples.value = String(index);
 }
 
-/** The toolchain is large, so it is created on first use and then reused. */
+/**
+ * The compiler is 19 MiB compressed, so it is created on first use and then reused. Files in memory
+ * are per run; the module itself is not.
+ */
 async function ensureCompiler() {
   if (compiler) return compiler;
 
-  setStatus('loading', 'loading toolchain…', 'busy');
-  setProgress('Downloading f2c, Clang and the WASI sysroot…');
+  setStatus('loading', 'loading compiler…', 'busy');
+  setProgress('Downloading the LFortran compiler (about 19 MiB compressed)…');
   const started = performance.now();
 
-  compiler = await createCompiler({
-    baseUrl: fortranMirror.baseUrl,
-    clangBaseUrl: clangMirror.baseUrl,
-    onProgress: (value) =>
-      setProgress(`Downloading the Clang runtime… ${Math.round(value * 100)}%`),
-  });
+  compiler = await createCompiler({ baseUrl: mirror.baseUrl });
 
-  document.documentElement.dataset.toolchainMs = String(
-    Math.round(performance.now() - started),
-  );
+  document.documentElement.dataset.toolchainMs = String(Math.round(performance.now() - started));
   setProgress(null);
   return compiler;
 }
@@ -204,7 +214,7 @@ async function run() {
   el.run.disabled = true;
   clearOutput();
   // Per-run metrics are read by the browser probes; stale values would lie.
-  for (const key of ['translateMs', 'compileMs', 'runMs', 'exitCode']) {
+  for (const key of ['runMs', 'exitCode']) {
     delete document.documentElement.dataset[key];
   }
 
@@ -216,27 +226,20 @@ async function run() {
     const result = await compiler.run(source, el.stdin.value.replace(/\r\n/g, '\n'));
 
     append(el.output, result.stdout);
-    appendDiagnostics(result.stderr);
-    if (result.errors.length) appendDiagnostics(result.errors.join('\n'));
+    append(el.diagnostics, result.errors);
 
-    document.documentElement.dataset.translateMs = String(result.translateMs);
-    document.documentElement.dataset.compileMs = String(result.compileMs);
-    document.documentElement.dataset.runMs = String(result.runMs ?? 'null');
+    document.documentElement.dataset.runMs = String(Math.round(result.runMs));
     document.documentElement.dataset.exitCode = String(result.exitCode ?? 'null');
 
-    const didFail = result.errors.length > 0 || result.exitCode == null;
-    const label = result.errors.length
-      ? 'failed'
-      : result.exitCode == null
-        ? 'stopped'
-        : `exit ${result.exitCode}`;
-    setStatus(didFail ? 'error' : 'done', label, didFail ? 'err' : 'ok');
+    // The compiler never rejects: a compile error, a program that stops, and a tripwire all arrive as
+    // a result with exitCode null and the reason in `errors`.
+    const didFail = result.exitCode == null;
+    setStatus(didFail ? 'error' : 'done', didFail ? 'failed' : 'exit 0', didFail ? 'err' : 'ok');
     el.duration.textContent = `${Math.round(performance.now() - started)} ms`;
   } catch (error) {
-    // Only this page's own problems land here: a compiler failure or a program fault comes back in
-    // the result rather than as a rejection.
+    // Only this page's own problems land here, such as the compiler failing to download.
     setProgress(null);
-    appendDiagnostics(error instanceof Error ? error.message : String(error));
+    append(el.diagnostics, error instanceof Error ? error.message : String(error));
     setStatus('error', 'failed', 'err');
     el.duration.textContent = `${Math.round(performance.now() - started)} ms`;
   } finally {
@@ -262,9 +265,7 @@ el.editor.addEventListener('keydown', (event) => {
   }
 });
 
-el.fortranUrl.textContent = fortranMirror.baseUrl;
-el.fortranOverride.textContent = fortranMirror.isOverride ? '(from ?fortranBaseUrl)' : '(default)';
-el.clangUrl.textContent = clangMirror.baseUrl;
-el.clangOverride.textContent = clangMirror.isOverride ? '(from ?clangBaseUrl)' : '(default)';
+el.baseUrl.textContent = mirror.baseUrl;
+el.baseOverride.textContent = mirror.isOverride ? '(from ?baseUrl)' : '(default)';
 document.documentElement.dataset.status = 'ready';
 loadExample(0);

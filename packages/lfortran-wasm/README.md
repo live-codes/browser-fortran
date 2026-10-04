@@ -139,6 +139,28 @@ The same loader and the same corpus are also driven against a real browser by
 `docker/lfortran-wasm/browser-test.html` (14/14) and in Node by `docker/lfortran-wasm/test-run.mjs`,
 which is how the browser path is verified rather than assumed.
 
+## Behaviour worth knowing
+
+Verified, not assumed — each of these was run:
+
+- **Bounds and intrinsic-domain errors are compile-time diagnostics.** `a(5) = 1` on `integer :: a(3)`
+  reports `Array index 5 is out of bounds (1 to 3)` and `sqrt(-1.0)` reports `Argument of 'sqrt' has a
+  negative argument`. They are not runtime traps.
+- **A trap does not poison the compiler.** Stack exhaustion from runaway recursion surfaces as
+  `Maximum call stack size exceeded`, and the next `run()` works normally. The same is true after a
+  program that exits, and after a failed read from an empty stdin.
+- **Integer division by zero prints `0`** rather than trapping or diagnosing. Fortran leaves it
+  undefined, so this is a defensible choice rather than a bug, but it is silent.
+- **Node cannot import the glue from a CDN.** Node's ESM loader accepts only `file:` and `data:` URLs,
+  so `baseUrl` pointing at a CDN works in a browser and a worker, and in Node only the wasm and
+  `.data` come from there — the loader says so explicitly rather than failing obscurely.
+- **The first load is network-bound.** 19.04 MiB compressed; on a slow link that is tens of seconds.
+  It is fetched once per page or worker and cached immutably by the CDN.
+- **Coverage is thin.** 14 corpus programs plus a 22-program spread — modules with contained
+  procedures, derived types, allocatables, array sections, whole-array arithmetic, formatted and file
+  I/O, stdin, libm. LFortran is a young compiler; coarrays, submodules, quad precision and parts of
+  I/O are not verified here, and a live playground will find things this does not.
+
 ## License
 
 MIT for this package. The wasm it ships is LFortran (BSD 3-Clause), LLVM and LLD (Apache-2.0 with

@@ -14,8 +14,13 @@ import { createCompiler } from '../../packages/lfortran-wasm/src/index.js';
 
 const OUT = fileURLToPath(new URL('./out/', import.meta.url));
 
-const compiler = await createCompiler({ baseUrl: new URL('./out/', import.meta.url) });
-console.log('compiler loaded\n');
+// An optional base URL, so the same corpus can be run against the assets the *published* package
+// serves rather than the local build:
+//   node test-run.mjs https://cdn.jsdelivr.net/npm/@live-codes/lfortran-wasm@0.1.0/assets/
+const baseUrl = process.argv[2] ?? new URL('./out/', import.meta.url);
+
+const compiler = await createCompiler({ baseUrl });
+console.log(`compiler loaded${process.argv[2] ? ` from ${process.argv[2]}` : ''}\n`);
 
 let passed = 0;
 let dumped = false;

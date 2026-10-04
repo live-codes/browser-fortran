@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link
       rel="icon"
-      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%236f4b9b'/><text x='8' y='12' font-size='8' font-family='monospace' text-anchor='middle' fill='white'>f77</text></svg>"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%236f4b9b'/><text x='8' y='12' font-size='8' font-family='monospace' text-anchor='middle' fill='white'>f90</text></svg>"
     />
-    <title>Fortran in the browser (f2c + Clang + WASM)</title>
+    <title>Fortran in the browser (LFortran + LLVM + WebAssembly)</title>
     <style>
       :root {
         color-scheme: dark;
@@ -168,48 +168,13 @@
       .runtime { text-align: right; margin-left: auto; }
     </style>
     <!--
-      The compiler, straight from the CDN — this page has no build step and no vendor mount.
+      The compiler, straight from the CDN — this page has no build step and no vendor mount, and no
+      import map: main.js imports the published package by URL, which is also how a worker does it.
 
-      `@live-codes/fortran-wasm`'s own dependency on `@live-codes/clang-wasm` is what pulls the
-      Clang half in: its ESM build imports `/npm/@live-codes/clang-wasm@0.2.0/toolchain/+esm` as an
-      absolute URL, so there is nothing to map for it and the one module instance is shared with
-      anything else on the page that used that entry.
-
-      The wasm assets come from jsDelivr too, out of the `assets/` directory of each package — both
-      halves are published, so this page is two files and a static server.
+      Nothing has to be shimmed here. The previous f2c + Clang pipeline needed a fake
+      `SharedArrayBuffer` global because the WASI host tested `x instanceof SharedArrayBuffer`; this
+      module is single-threaded and never mentions it, so the page runs unisolated and untouched.
     -->
-    <script type="importmap">
-      {
-        "imports": {
-          "@live-codes/fortran-wasm": "https://cdn.jsdelivr.net/npm/@live-codes/fortran-wasm@0.1.0/+esm"
-        }
-      }
-    </script>
-    <!--
-      This shim is what lets the page run WITHOUT cross-origin isolation.
-
-      The WASI host inside @wasm-idle/llvm-core writes to guest memory with a
-      chain that tests `value instanceof SharedArrayBuffer`. `instanceof`
-      evaluates its right-hand operand, so in a document where the global does
-      not exist the first Uint8Array written throws `ReferenceError:
-      SharedArrayBuffer is not defined`, and compilation dies before it starts.
-
-      Nothing here uses shared memory. Checked against the shipped bundle: the
-      only occurrence of `SharedArrayBuffer` is that one `instanceof` test —
-      there is no `new SharedArrayBuffer`, no `new WebAssembly.Memory`, no
-      worker and no `crossOriginIsolated` read. So defining the constructor
-      purely to give that check something to compare against is sufficient, and
-      it still fails loudly if anything ever tries to construct one.
-    -->
-    <script>
-      if (typeof SharedArrayBuffer === 'undefined') {
-        globalThis.SharedArrayBuffer = class SharedArrayBuffer {
-          constructor() {
-            throw new Error('SharedArrayBuffer is not available in this context');
-          }
-        };
-      }
-    </script>
   </head>
   <body>
     <header>
@@ -225,14 +190,14 @@
     <div id="progress" hidden>
       <span id="progress-text"></span>
       <span class="track"></span>
-      <span class="hint">the toolchain is fetched once from the runtime mirror, then cached</span>
+      <span class="hint">the compiler is fetched once from the runtime mirror, then cached</span>
     </div>
 
     <main>
       <section>
         <div class="pane-head">
-          <span id="filename">main.f</span>
-          <span class="hint">fixed-form Fortran 77 &middot; <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + <kbd>Enter</kbd> to run</span>
+          <span id="filename">main.f90</span>
+          <span class="hint">modern Fortran, free form &middot; <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + <kbd>Enter</kbd> to run</span>
         </div>
         <textarea id="editor" spellcheck="false" autocomplete="off"></textarea>
       </section>
@@ -242,16 +207,15 @@
         <textarea id="stdin" spellcheck="false" autocomplete="off" placeholder="one value per READ"></textarea>
         <div class="pane-head">Program output <span class="hint">stdout, shown when the program has finished</span></div>
         <pre id="output" class="output"></pre>
-        <div class="pane-head">Compiler / stderr <span class="hint">f2c, clang and wasm-ld diagnostics, and the program's stderr</span></div>
+        <div class="pane-head">Compiler / stderr <span class="hint">LFortran diagnostics, and the program's stderr</span></div>
         <pre id="diagnostics" class="output"></pre>
       </section>
     </main>
 
     <footer>
-      <span class="hint">f2c &rarr; C &rarr; Clang 22 &rarr; wasm-ld &rarr; WASI, entirely in this tab</span>
+      <span class="hint">LFortran &rarr; LLVM &rarr; WebAssembly, compiled and run entirely in this tab</span>
       <span class="runtime">
-        <code id="fortran-url"></code> <span id="fortran-override"></span><br />
-        <code id="clang-url"></code> <span id="clang-override"></span>
+        <code id="base-url"></code> <span id="base-override"></span>
       </span>
     </footer>
 

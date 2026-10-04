@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>LFortran in a worker, from the CDN</title>
+<style>
+	body { font: 13px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace; margin: 1rem; }
+	#summary { font-size: 1.4rem; font-weight: 700; }
+	#summary[data-state="pending"] { opacity: 0.5; }
+	.ok { color: #0a0; }
+	.fail { color: #c00; }
+	ul { margin-bottom: 0.5rem; }
+</style>
+</head>
+<body>
+<div id="summary" data-state="pending">starting a worker…</div>
+<pre id="detail"></pre>
+
+<script type="module">
+	// The worker imports the published package from jsDelivr and runs the corpus there. Nothing about
+	// the compiler is configured here — that is the point.
+	const summary = document.getElementById('summary');
+	const detail = document.getElementById('detail');
+
+	const verdict = (text, cls, detailText) => {
+		summary.dataset.state = 'done';
+		summary.className = cls;
+		summary.textContent = text;
+		document.body.dataset.status = detailText;
+		window.__lfortran = { status: detailText };
+	};
+
+	const worker = new Worker('./worker-test.worker.js', { type: 'module' });
+
+	worker.onmessage = (event) => {
+		const { stage, failed, passed, total, failures, loadMs, slowest, scope, source, cdnError } = event.data;
+		if (stage) {
+			summary.textContent = stage;
+			return;
+		}
+		if (failed) {
+			verdict(`FAILED: ${failed}`, 'fail', `failed: ${failed}`);
+			return;
+		}
+		const lines = [
+			`ran in a ${scope}, loading ${source}`,
+			`compiler ready in ${loadMs} ms`,
+			`slowest program: ${slowest.name} at ${Math.round(slowest.runMs)} ms`,
+		];
+		if (cdnError) lines.push(`CDN import failed: ${cdnError}`);
+		if (failures.length) lines.push(...failures.map((f) => `  ${f}`));
+		detail.textContent = lines.join('\n');
+		verdict(
+			`${passed}/${total} compiled and ran`,
+			failures.length ? 'fail' : 'ok',
+			failures.length ? `failures: ${failures.length}` : 'all passed',
+		);
+	};
+
+	worker.onerror = (event) => {
+		verdict(`worker error: ${event.message}`, 'fail', `worker error: ${event.message}`);
+	};
+</script>
+</body>
+</html>

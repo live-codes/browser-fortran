@@ -93,7 +93,17 @@ export async function createCompiler(options = {}) {
 	const stdout = [];
 	const stderr = [];
 	const binary = wasmBinary ?? (await readGzippedBytes(new URL(wasmUrl ?? 'wasm_run.wasm.gz', assetBase)));
-	const glue = await import(new URL(glueUrl ?? 'wasm_run.js', assetBase).href);
+	const glueHref = new URL(glueUrl ?? 'wasm_run.js', assetBase).href;
+	if (inNode && !/^(file|data):/.test(glueHref)) {
+		// Node's ESM loader accepts only file: and data: URLs, so a CDN-hosted glue cannot be imported
+		// there even though the wasm and .data fetch fine over https. Browsers and workers import it
+		// from a CDN without ceremony, which is where this normally runs.
+		throw new Error(
+			`node cannot import the glue from ${glueHref}: its ESM loader supports only file: and data: URLs. ` +
+				'Point glueUrl at a local copy, or run this in a browser or a worker.',
+		);
+	}
+	const glue = await import(glueHref);
 	const factory = glue.default ?? glue.createLFortran;
 	if (typeof factory !== 'function') {
 		throw new Error('the glue module did not export a factory');

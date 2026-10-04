@@ -9,22 +9,32 @@ same shape as [`browser-cobol`](https://github.com/live-codes/browser-cobol) and
 [`browser-elixir`](https://github.com/live-codes/browser-elixir) were for their languages.
 
 ```
-Fortran 77  →  f2c (wasm)  →  C  →  Clang 22 (wasm)  →  wasm-ld  →  WASI module  →  runs
+modern Fortran  →  LFortran + LLVM (wasm)  →  compiled and run in-place
 ```
 
-**The compiler is a package in this repository** — [`packages/fortran-wasm`](packages/fortran-wasm),
-published as `@live-codes/fortran-wasm` — and this page is a harness around it:
+There is no separate link step: a browser has no linker subprocess to hand a binary to, so LFortran
+compiles the program in-process and the module loads it with `dlopen` — which is why it is built
+`-s MAIN_MODULE=1`. Nothing in the pipeline is threaded, so no `SharedArrayBuffer` and no isolation
+headers are involved.
+
+**The compiler is a package in this repository** —
+[`packages/lfortran-wasm`](packages/lfortran-wasm), published as `@live-codes/lfortran-wasm` — and this
+page is a harness around it:
 
 ```js
-import { createCompiler } from '@live-codes/fortran-wasm';
+import { createCompiler } from '@live-codes/lfortran-wasm';
 
-const compiler = await createCompiler({ baseUrl, clangBaseUrl });
+const compiler = await createCompiler({ baseUrl });   // 19 MiB compressed, fetched once, then reused
 const { stdout, errors, exitCode } = await compiler.run(source, stdin);
 ```
 
-The Clang half is [`@live-codes/clang-wasm`](https://www.npmjs.com/package/@live-codes/clang-wasm)'s
-runtime, taken through that package's low-level `/toolchain` entry and **shared** with the C, C++ and
-Objective-C languages it already runs — one ~28 MB load, one ~84 MB resident, one lock.
+It ships **19 MiB compressed** (70.75 MiB of wasm) — less than the ~28.5 MiB Clang toolchain LiveCodes
+already loads for C and C++, and only Fortran users pay it.
+
+`packages/fortran-wasm` is the earlier f2c pipeline (Fortran 77 → C → Clang → WASI). It works and it is
+published, but it is **superseded**: it rejects free-form source on the first line, and it compiles
+`PRINT *, A(2:3)` into a whole-array print that exits 0 and is silently wrong. It is kept for
+reference rather than removed.
 
 ## Demo
 
