@@ -1,7 +1,7 @@
 # Browser Fortran
 
 Run **Fortran entirely in the browser** — no server, no upload, no install, and no cross-origin
-isolation headers. The compiler runs in WebAssembly, so a program typed into the page is compiled and
+isolation headers. The compiler runs in WebAssembly, so a program typed into a page is compiled and
 executed in that tab.
 
 It is a proof of concept for adding a `fortran` language to [LiveCodes](https://livecodes.io), in the
@@ -9,7 +9,7 @@ same shape as [`browser-cobol`](https://github.com/live-codes/browser-cobol) and
 [`browser-elixir`](https://github.com/live-codes/browser-elixir) were for their languages.
 
 ```
-modern Fortran  →  LFortran + LLVM (wasm)  →  compiled and run in-place
+modern Fortran  →  LFortran + LLVM (wasm)  →  compiled and run in place
 ```
 
 There is no separate link step: a browser has no linker subprocess to hand a binary to, so LFortran
@@ -18,162 +18,160 @@ compiles the program in-process and the module loads it with `dlopen` — which 
 headers are involved.
 
 **The compiler is a package in this repository** —
-[`packages/lfortran-wasm`](packages/lfortran-wasm), published as `@live-codes/lfortran-wasm` — and this
-page is a harness around it:
+[`packages/lfortran-wasm`](packages/lfortran-wasm), published as `@live-codes/lfortran-wasm`:
 
 ```js
 import { createCompiler } from '@live-codes/lfortran-wasm';
 
-const compiler = await createCompiler({ baseUrl });   // 19 MiB compressed, fetched once, then reused
+const compiler = await createCompiler();           // once; each run is milliseconds after this
 const { stdout, errors, exitCode } = await compiler.run(source, stdin);
 ```
 
-It ships **19 MiB compressed** (70.75 MiB of wasm) — less than the ~28.5 MiB Clang toolchain LiveCodes
-already loads for C and C++, and only Fortran users pay it.
+## Why this exact LFortran
 
-`packages/fortran-wasm` is the earlier f2c pipeline (Fortran 77 → C → Clang → WASI). It works and it is
-published, but it is **superseded**: it rejects free-form source on the first line, and it compiles
-`PRINT *, A(2:3)` into a whole-array print that exits 0 and is silently wrong. It is kept for
-reference rather than removed.
+LFortran is the only real answer for Fortran in a browser — `gfortran` has no wasm target, `flang` has
+no maintained wasm build, and a JavaScript interpreter is not a compiler. The question turned out to be
+*which* build, and every published one is wrong for this use, in one of two ways. All of the following
+was measured, not inferred.
 
-## Demo
+**Every published LFortran wasm build is `-DWITH_LLVM=no`.** LFortran's own wasm backend emits a
+module directly, which makes a small, fast, upstream-maintained artifact — and it cannot compile
+ordinary modern Fortran. Against release `e8c53fddf` (0.59.0):
 
-```bash
-npm start          # → http://localhost:8127/
-```
+| feature | wasm backend (all published builds) | LLVM backend at 0.59.0 |
+| --- | --- | --- |
+| `print *` inside a `do` loop | works | **works** |
+| module + contained procedure | works | works |
+| derived-type member access (`q%x`) | **`visit_StructInstanceMember() not implemented`** | works |
+| array section (`a(2:3)`) | **`visit_ArraySection() not implemented`** | works |
+| allocatable array (`allocate(v(3))`) | **`visit_Allocate() not implemented`** | works |
+| `read` / stdin | **aborts with `CodeGenAbort`** | works |
+| real `sqrt`, string concatenation | works | works |
 
-There is nothing to install and nothing to copy: the compiler is a published package, its Clang is a
-published package, and both ship their wasm. `public/` is two files — an `index.html` with a one-entry
-import map and a `main.js` that drives the compiler — and everything else is fetched from jsDelivr on
-first use. ~29 MB, once, in about 21 seconds cold.
+Those gaps are **not** fixed on `main` — they are identical at `0.66.0-602-gd981ac1f4`, where the
+diagnostics have degraded from named `visit_X() not implemented` to a bare `LCompilersException`.
 
-Pick an example (or type your own), press **Run** — or `Ctrl`/`Cmd` + `Enter` in the editor. Program
-output appears in the right pane, diagnostics below it, and `READ` takes what is in the stdin box.
+**And the LLVM backend loses `print *` inside a `do` loop from 0.60.0 onward.** Measured across the
+published release ladder, same pipeline, same program, only the build changed:
 
-A static server is required, because `file://` cannot run ES modules — but it needs no special
-headers, and `npm start` is a plain file server.
+| release | wasm | `do` loop with `print *` |
+| --- | --- | --- |
+| 0.52.0 (`b5e05bd3a`) | 22.32 MiB | `1 2 3` |
+| **0.59.0 (`e8c53fddf`)** | **11.75 MiB** | **`1 2 3`** |
+| 0.60.0 (`2f734343f`) | 12.00 MiB | *nothing* |
+| 0.62.0 / 0.63.0 | 13.51 / 13.65 MiB | *nothing* |
+| 0.66.0 (`569035a33`) | 16.62 MiB | *nothing* |
+| `dev` `d981ac1f4` (0.66.0 + 602) | 17.60 MiB | *nothing* |
 
-The Clang half arrives through `@live-codes/fortran-wasm`'s own dependency on `@live-codes/clang-wasm`,
-which jsDelivr rewrites to an absolute URL — the same URL a page would map by hand, so anything else
-using that entry shares one module instance, one runtime and one lock with it. Nothing under `public/`
-mentions `@live-codes/clang-wasm` at all.
+"Nothing" means it compiles, runs and exits 0 with empty output, and the emitted module comes out
+**smaller than a hello-world's** — 644 bytes against 898 for the working build — so the statement is
+dropped at codegen rather than the output being lost. It is reproducible on the LLVM backend too, and
+the `| (I0)` formatted write in the same loop still works.
 
-Point either half somewhere else — a mirror we control, or a directory `*-copy-assets` wrote — with
-`?fortranBaseUrl=` and `?clangBaseUrl=`.
-
-## What you get
-
-- **Client-side compilation and execution.** Nothing is uploaded; `f2c`, clang and the linked program
-  all run in the tab.
-- **The real Fortran toolchain.** Upstream `f2c` (the Fortran 77 → C translator) plus the reference
-  `libf2c` runtime, compiled to WebAssembly — not a subset interpreter.
-- **Programs, subroutines and functions.** `DO`/`CONTINUE`, labelled statements, arrays, `DATA`,
-  `COMPLEX`, formatted and list-directed file I/O, and `READ` from stdin.
-- **One Clang, shared.** The page asks the same runtime pool `createCompiler` uses, so a page that also
-  runs C/C++ pays for one toolchain rather than two, and both queue on the same lock.
-- **Genuine compiler diagnostics**, each from the tool that produced it:
-
-  ```
-  main.f:
-     MAIN broken:
-  Error on line 7 of main.f: DO loop or BLOCK IF not closed
-  Error on line 7 of main.f: missing statement label 10
-  ```
-
-  ```
-  wasm-ld: error: main.o: undefined symbol: nosuchsub_
-  ```
-
-- **No cross-origin isolation.** See below — the same trick the COBOL spike needed.
-- **Pinned toolchain.** Every asset, in both halves, is checked against a SHA-256 receipt before it is
-  used.
-
-## No cross-origin isolation
-
-Threaded WebAssembly runtimes need `SharedArrayBuffer`, which browsers only expose to
-cross-origin-isolated documents — a real obstacle when embedding a playground in someone else's page,
-where the top-level headers are not yours to choose.
-
-**This page does not need it.** Served with no isolation headers at all, `crossOriginIsolated` is
-`false` and everything still compiles and runs. `@live-codes/clang-wasm` installs the stub itself; the
-evidence behind that, checked against the shipped bundle, is in FINDINGS.md §4.
-
-## Verified
-
-Every row below was run through the page in headless Chrome **with isolation off**
-(`crossOriginIsolated === false`); outputs are verbatim.
-
-| program | result | f2c | compile + link | run |
-| --- | --- | --- | --- | --- |
-| Hello world | `Hello from Fortran!` / `Compiled and run in your browser, with no server.` | 14 ms | 781 ms | 3 ms |
-| `DO 10 I = 1, 10` loop | ten `n= NN  n squared= NNN` lines, then `Done.` | 4 ms | 291 ms | 2 ms |
-| Arrays, `DATA`, `REAL` | `Sum  =   15.` / `Mean =   3.` | 3 ms | 189 ms | 4 ms |
-| A subroutine and a function | `doubled: 42` / `tripled: 42` | 3 ms | 180 ms | 3 ms |
-| `READ *, A` with stdin `20` / `22` | `Enter two integers, one per line:` / `Sum =  42` | 3 ms | 177 ms | 5 ms |
-| unterminated `DO` loop | `Error on line 7 of main.f: missing statement label 10` | — | — | — |
-
-The package's own suite covers more of that surface in Node — a file round-trip, a program that trips
-a trap, the result shape, and the shared toolchain — with `npm --prefix packages/fortran-wasm test`.
-
-Toolchain load: **~21 s cold** — ~29 MB over the wire from jsDelivr, then 44 MB of clang and the 19 MB
-sysroot to decompress. On a repeat visit it is a few seconds, and that remainder is the decompression
-rather than the network: with the same assets served from localhost it measured ~7 s. It happens once
-per page.
-
-## Limitations
-
-- **Fortran 77 only.** `f2c` is a Fortran 77 translator, so this is fixed-form source (`main.f`) with
-  statements starting at column 7 and labels in columns 1–5. There are no modules, derived types,
-  array sections, `ALLOCATABLE` or free-form F90+ syntax. Full modern Fortran needs LFortran — see
-  FINDINGS.md §1, and §7 for why that should decide how this ships.
-- **Calling the runtime library's own routines traps.** `GETARG`, `EXIT`, and libf2c's own error paths
-  (a missing file on `OPEN`, say) end the program with a WebAssembly trap, because `f2c` cannot pass
-  the interface `libf2c` was compiled with. It is reported rather than thrown. One consequence is that
-  **a Fortran program cannot read its own argv**, so there is deliberately no `args` option.
-- **~29 MB on first run,** and ~21 s to fetch and unpack it. It works on a laptop; it is not a small
-  download.
-- **~0.3–1.5 s to compile**, dominated by clang on the generated C. Fine for a playground; noticeable
-  in a tight edit-run loop.
-- **stdin is all-or-nothing per run.** The stdin box is read once when the program starts.
-- **No `f2c` warnings on success.** `f2c` prints a bare `file: / program-unit:` preamble on every run,
-  so the driver surfaces its output only when `f2c` fails.
-
-## Layout
+**So 0.59.0 is the newest release where the LLVM backend is both complete and correct**, and the only
+artifact that is both is one we build ourselves. Verified natively at that tag (LLVM 21.1.2):
 
 ```
-packages/fortran-wasm/   @live-codes/fortran-wasm — the published compiler, its tests, its own README
-public/index.html        the harness page (examples, stdin, output, diagnostics, import map)
-public/main.js           the harness: create a compiler, render a result, expose the timings
-serve.js                 static server: MIME types, caching, --isolation
-FINDINGS.md              the spike log: what was verified, what broke, what it means
+=== do loop with print *  (the regression case) ===   1 2 3
+=== derived type member access ===                    7.00000000e+00
+=== array section ===                                 1.00000000e+00 1.00000000e+00
+=== read from stdin ===                               42
 ```
 
-`public/` is the whole demo. The wasm it runs on is in the packages, on jsDelivr, and
-`packages/fortran-wasm/node_modules` exists only for that package's tests.
+The wasm build of the same source is in `docker/lfortran-wasm/out-059/` —
+`wasm_run.wasm` 57,186,792 bytes, `wasm_run.js` 566,837, `wasm_run.data` 72,569. That is 54.5 MiB raw,
+against 63.70 MiB for the `v0.66.0` build this package shipped before, and it carries the stdin fix
+(fd 0 plus `clearerr`, below).
+
+## Packages
+
+| package | what it is |
+| --- | --- |
+| [`packages/lfortran-wasm`](packages/lfortran-wasm) | `@live-codes/lfortran-wasm` — the compiler above, streaming Fortran 2018-ish source to wasm. **The shipping path.** |
+| [`packages/fortran-wasm`](packages/fortran-wasm) | `@live-codes/fortran-wasm` — the earlier f2c pipeline (Fortran 77 → C → Clang → WASI). Works and is published, but **superseded**: it rejects free-form source on the first line and compiles `PRINT *, A(2:3)` into a whole-array print that exits 0 and is silently wrong. Kept for reference. |
+
+Only Fortran users pay for the download, and the Clang half of the older package is shared with
+LiveCodes' C/C++ toolchain rather than duplicated.
+
+## Building the artifact
+
+The toolchain lives in a Docker image; only the LFortran build runs in a container, so the long part can
+be retried without installing gigabytes again.
+
+```sh
+docker build -t lfortran-wasm-build docker/lfortran-wasm
+```
+
+The **default** ref builds upstream's source unmodified against LLVM 22:
+
+```sh
+docker run -d --name lfortran-wasm-run lfortran-wasm-build
+docker cp lfortran-wasm-run:/src/build-wasm/src/bin/wasm_run.js   docker/lfortran-wasm/out/
+docker cp lfortran-wasm-run:/src/build-wasm/src/bin/wasm_run.wasm docker/lfortran-wasm/out/
+docker cp lfortran-wasm-run:/src/build-wasm/src/bin/wasm_run.data docker/lfortran-wasm/out/
+```
+
+The **shipping** artifact is 0.59.0, which needs a port — the wasm environments it depends on did not
+exist at that ref, and neither did `wasm-build0.sh`. `docker/lfortran-wasm/build-wasm-059.sh` does all
+of it, including borrowing the native build's runtime `.mod` files so the expensive step is skipped:
+
+```sh
+docker run -d --name lf-wasm059 lfortran-wasm-build sleep infinity
+docker cp docker/lfortran-wasm/build-wasm-059.sh lf-wasm059:/port.sh
+docker cp docker/lfortran-wasm/wasm-run-main.cpp lf-wasm059:/wasm-run-main.cpp
+docker cp docker/lfortran-wasm/build-in-container.sh lf-wasm059:/build.sh
+docker exec -d lf-wasm059 bash -c "bash /port.sh > /port.log 2>&1"
+```
+
+Then vendor and bundle it:
+
+```sh
+npm --prefix packages/lfortran-wasm run copy-assets   # gzips into assets/, prints SHA-256 receipts
+npm --prefix packages/lfortran-wasm run build:iife    # dist/lfortran-wasm.global.js
+```
 
 ## Verifying
 
+The available builds can be compared without building anything, because the toolchain image can be
+driven with the same package code the loader uses:
+
 | what | command |
 | --- | --- |
-| serve the page | `npm start` → http://localhost:8127/ |
-| check syntax | `npm run check` |
-| serve with COOP/COEP instead | `npm run start:isolation` |
-| the package's own tests | `npm --prefix packages/fortran-wasm test` |
+| how a published build behaves on one program | `node docker/lfortran-wasm/pipeline.mjs release/e8c53fddf` |
+| what a published build supports, feature by feature | `node docker/lfortran-wasm/capabilities.mjs dev/d981ac1f4` |
+| the package's own tests | `npm --prefix packages/lfortran-wasm test` |
+| the same corpus against another build | `set LFORTRAN_WASM_BUILD=dev/d981ac1f4 && npm --prefix packages/lfortran-wasm test` |
 
-The page exposes `document.documentElement.dataset` (`status`, `runs`, `exitCode`, `toolchainMs`,
-`translateMs`, `compileMs`, `runMs`) and its element ids as globals, so scripted checks can read state
-and drive the page without string literals.
+`capabilities.mjs` checks **expected output**, not just the exit code — a build that silently drops the
+statement still exits 0, which is exactly the loop regression and would otherwise be reported as
+supported.
+
+## Limitations
+
+- **`print *` inside a `do` loop is why the version is pinned.** Upstream regression, present from
+  0.60.0 through current `main`, on both backends. Not fileable as "LFortran cannot do this" — it
+  works at 0.59.0.
+- **The published wasm-backend builds cannot compile** derived types, array sections, allocatables or
+  `read`. That is why they are not used, and why the loader that drives them is a tool rather than the
+  shipping path.
+- **54.5 MiB of wasm**, fetched once per page or worker. Comparable to the `v0.66.0` build it replaces
+  and to the Clang toolchain LiveCodes already loads for C/C++.
+- **A browser has no linker process.** Programs are compiled in-process and loaded with `dlopen`, which
+  is why the module is a `MAIN_MODULE` and carries the export section that implies.
+- **LFortran is a young compiler.** Coarrays, submodules, quad precision and parts of I/O are not
+  verified here, and a live playground will find things this does not.
 
 ## Status
 
-Spike complete. `@live-codes/clang-wasm@0.2.0` and `@live-codes/fortran-wasm@0.1.0` are both
-published, and this page loads the compiler from jsDelivr with no vendor mount and no build step —
-what is left is to mirror the wasm assets somewhere we control rather than copying them from npm on
-demand, and to decide whether `fortran` ships on `f2c` (Fortran 77) or waits for a published LFortran.
+The 0.59.0 LLVM-backend wasm is **built and its artifacts are copied out**; the compiler itself is
+verified natively on the four cases above. What remains is to run those cases through the wasm module,
+vendor the assets, and republish — plus switch the package's loader back to the `run_fortran` shape,
+since the artifact is the LLVM backend with our own entry point rather than an official build's
+`emit_wasm_from_source`.
 
 ## License
 
-MIT © Hatem Hosny. The compiler artifacts keep their own licenses — `f2c` and `libf2c` under their
-netlib notice, reproduced in
-[packages/fortran-wasm/THIRD-PARTY-NOTICES.md](packages/fortran-wasm/THIRD-PARTY-NOTICES.md), and
-Clang, LLD, memfs and the sysroot under Apache-2.0 WITH LLVM-exception. See [LICENSE](LICENSE).
+MIT. The compiler artifacts keep their own licenses — LFortran under BSD 3-Clause, LLVM and LLD under
+Apache-2.0 WITH LLVM-exception, Emscripten under MIT/University of Illinois, and the older `f2c`
+pipeline's assets under their netlib notice. See [LICENSE](LICENSE) and each package's
+`THIRD-PARTY-NOTICES.md`.

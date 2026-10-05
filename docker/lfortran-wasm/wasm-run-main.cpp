@@ -16,6 +16,7 @@
 // Deliberately single-threaded: no pthreads anywhere, so the host needs no SharedArrayBuffer and no
 // cross-origin isolation.
 
+#include <cstdio>
 #include <string>
 
 #include <lfortran/fortran_evaluator.h>
@@ -47,6 +48,14 @@ extern "C" {
 
 // Returns "0" when the program ran, or "1,<diagnostics>" when it did not.
 KEEPALIVE char *run_fortran(char *input) {
+    // Clear stdin's end-of-file flag before every run. The C library keeps it set once a read has hit
+    // end-of-input, and nothing else clears it, so a run with no stdin — which is what a host with an
+    // empty input pane gives — leaves every later run unable to read: they die with "Failed to read
+    // input." even when input is supplied. Measured: with input, a run following an empty one still
+    // failed. Only the flag is reset, not the stream position, because each run's stdin is a fresh
+    // file.
+    clearerr(stdin);
+
     LCompilers::CompilerOptions compiler_options;
     compiler_options.use_colors = false;
     compiler_options.indent = true;

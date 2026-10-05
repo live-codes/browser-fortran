@@ -413,3 +413,196 @@ bytes, plus `WebAssembly.Module.imports`/`exports` over the extracted `main.o`. 
 §4 was a substring/occurrence count over the minified host source. When the page looked broken and the
 server looked fine, walking the module graph over HTTP from the page's own entry — fetching each
 module and resolving its specifiers through the import map — found the unmapped one immediately.
+
+---
+
+# Part two — LFortran, measured
+
+Everything in §1–§9 is the f2c spike. This part is the LFortran replacement, and like the first it is
+all run, not inferred: the compiler was built, the published builds were driven, and the four cases
+that decide the question were executed.
+
+## 10. No published LFortran build can be shipped
+
+`lfortran.github.io/wasm_builds` publishes a build of every commit, indexed by `data.json`, and that is
+what dev.lfortran.org runs. **Every one of them is `-DWITH_LLVM=no`**: LFortran's own wasm backend emits
+a module directly, with no LLVM, no LLD and no `dlopen`. The artifacts are small and current — and they
+cannot compile ordinary modern Fortran. Against release `e8c53fddf` (0.59.0):
+
+| feature | wasm backend | LLVM backend @ 0.59.0 |
+| --- | --- | --- |
+| `print *` in a `do` loop | works | works |
+| module + contained procedure | works | works |
+| derived-type member access (`q%x`) | `visit_StructInstanceMember() not implemented` | works |
+| array section (`a(2:3)`) | `visit_ArraySection() not implemented` | works |
+| allocatable array (`allocate(v(3))`) | `visit_Allocate() not implemented` | works |
+| `read` / stdin | aborts with `CodeGenAbort` | works |
+| real `sqrt`, string concatenation | works | works |
+
+None of it is fixed on `main`. At `0.66.0-602-gd981ac1f4` the same four features fail, and the
+diagnostics have *degraded* from named `visit_X() not implemented` to a bare `LCompilersException`.
+`read` aborts on every published build from 0.52.0 through 0.66.0, so it is a long-standing limitation
+rather than a regression.
+
+That ruled out the wasm backend for a playground — no derived types, no array sections, no
+allocatables, no stdin — which left the LLVM backend, which is where the published set has nothing for
+us at all.
+
+## 11. The regression, and how narrow it is
+
+The LLVM backend has one problem of its own. Same pipeline, same program, only the build changed:
+
+| release | wasm | `do` loop with `print *` |
+| --- | --- | --- |
+| 0.52.0 (`b5e05bd3a`) | 22.32 MiB | `1 2 3` |
+| **0.59.0 (`e8c53fddf`)** | **11.75 MiB** | **`1 2 3`** |
+| 0.60.0 (`2f734343f`) | 12.00 MiB | nothing |
+| 0.62.0 (`b84f57bb4`) | 13.51 MiB | nothing |
+| 0.63.0 (`8f4dab985`) | 13.65 MiB | nothing |
+| 0.66.0 (`569035a33`) | 16.62 MiB | nothing |
+| `dev` (`d981ac1f4`, 0.66.0+602) | 17.60 MiB | nothing |
+
+The regression is between **0.59.0 and 0.60.0** and it is still present on `main`. The mechanism is
+visible in the artifact rather than guessed: the broken build emits a module of **644 bytes** for that
+program against **898** for the working one — smaller than a hello-world's 701 — so the statement is
+dropped at codegen, not misdirected at runtime.
+
+Its scope is narrow, which is what makes it worth working around rather than reporting as "LFortran
+cannot do this". On 0.60.0 the *only* failing case out of five was the loop print: declaration and
+assignment work, a loop whose body does arithmetic works, and `print *` after an empty loop works. Only
+the combination fails, and `write (*, '(I0)') i` in the same loop prints correctly.
+
+Nothing about this was concluded from reading source. **0.59.0 was built natively** — an x86 Linux
+build against its own LLVM line, using the ref's own `llvm21` pixi environment, which sidesteps the
+missing wasm environments entirely — and run:
+
+```
+=== version ===                LFortran version: 0.59.0   LLVM: 21.1.2
+=== do loop with print * ===   1 2 3
+=== derived type access ===    7.00000000e+00
+=== array section ===          1.00000000e+00    1.00000000e+00
+=== read from stdin ===        42
+```
+
+`--linker=gcc` there because LFortran links by invoking clang and the image has gcc; the compiler says
+so itself.
+
+## 12. What an official build's API actually is
+
+Driving one of those builds directly took four corrections, each from an error rather than
+documentation:
+
+- **`callMain` is not exported.** The glue is a *classic* script that runs `main()` itself at load,
+  taking its command line from `Module.arguments`. So a module can only be *evaluated* once per realm —
+  its script-scope bindings (`ExitStatus` among them) cannot be redeclared — and `noInitialRun`
+  without `callMain` leaves no way to start it.
+- **The compile entry point is `emit_wasm_from_source`**, reachable with `cwrap`, because the heap
+  helpers are not exported but `cwrap` marshals strings for you:
+  `cwrap('emit_wasm_from_source', 'string', ['string'])`. It returns **`"<status>,<byte>,<byte>,…"`** —
+  a status, then the module as decimal bytes; `nonzero` status carries LFortran's rendered diagnostic.
+  `_emit_wat_from_source` returns readable WAT.
+- **The filesystem is only partly reachable.** `FS`, `HEAPU8`, `UTF8ToString` and `stringToUTF8` all
+  abort with "wasm not exported"; what *is* exported is the file packager's helper set —
+  `FS_createDataFile`, `FS_createLazyFile`, `FS_createPreloadedFile`, `FS_createPath`,
+  `FS_createDevice`, `FS_unlink`. There is no exported way to read a file back.
+- **The CLI route compiles by emitting `p.out.js` and loading it.** Under Node that fails with
+  `Cannot find module '…p.out.js'`, because the file lands in the virtual filesystem — and the
+  "Compilation time / Execution time" lines dev.lfortran.org shows are printed by that generated
+  harness, which is why they appear at all.
+
+**And the run side is a fresh wasm instance per program**, which is the part worth copying: the
+playground's own page chunk instantiates the compiled module against a WASI import object and calls
+`_start()` between two `performance.now()` readings.
+
+```js
+{ wasi_snapshot_preview1: { fd_write (fd, iovs, count, written) { … } } }
+instance.exports._start()
+```
+
+That is why a *published* build cannot have the shared-state problems our own long-lived module had,
+and it is the design to prefer wherever it is available. It also reproduced the playground's timing to
+the digit — `0.3 ms` against their `0.29999999701976765 ms` — which is how we know the harness matches
+theirs rather than merely resembling it.
+
+Building a module per compile is affordable because compiling many programs through one *loaded*
+compiler is what `emit_wasm_from_source` allows; it is the *module evaluation* that cannot repeat.
+
+## 13. Building 0.59.0 took six things
+
+The port is `docker/lfortran-wasm/build-wasm-059.sh`. Every item below was found by running it, and
+each one fails in a way that looks like something else:
+
+1. **Its `[environments]` table had to be narrowed.** 0.59.0 lists `llvm7`…`llvm21` and `test`.
+   `wasm-host` has to add the emscripten-wasm32 platform to the workspace, and pixi then validates
+   *every* environment against it: `failed to solve requirements of environment 'test' for platform
+   'emscripten-wasm32'`.
+2. **The wasm features do not exist at that ref** and were appended from a later manifest — toolchain
+   definitions, independent of LFortran's sources. The prefixed channel mirrors alone were not enough
+   to resolve python; plain `conda-forge` had to be listed too.
+3. **`python = "==3.12"` pins had to be loosened.** Pins in the *default* feature resolve for every
+   environment, wasm32 included, where 3.12 is not published: `No candidates were found for python`.
+   The same applies to the default feature's other native dependencies, which is why its tables are
+   renamed out of the way — an implicit default environment is solved for every workspace platform, so
+   it has to be empty.
+4. **`HAVE_BUILD_TO_WASM` had to be defined** — the most interesting one, and upstream's own answer:
+
+   ```cpp
+   #if !defined(HAVE_BUILD_TO_WASM) && !defined(__ppc__)
+   static_assert(sizeof(YYSTYPE) == sizeof(Vec<AST::ast_t*>));
+   #endif
+   ```
+
+   The equality holds on a 64-bit host and not on wasm32. The `$__ppc__` clause gives it away: this is
+   a known portability boundary, guarded, and the guard only needed the macro. Defining it rather than
+   enabling `LFORTRAN_BUILD_TO_WASM` keeps the emit-only CLI out of the build.
+5. **LLVM 21 had to be specified as a range, and installed separately.** `llvm==21.1.2` has no candidate
+   on the wasm channel where `llvm>=21,<22` resolves — and `pixi add` only edits the manifest, so
+   without a following `pixi install -e wasm-host --platform emscripten-wasm32` the build silently
+   links the *image's* LLVM. It did, and the failure looked like a Fortran problem:
+   `no member named 'CreateGlobalStringPtr' in 'llvm::IRBuilder<>'`, which is LLVM 22's API.
+6. **The terminator patch had to be switched off.** `getTerminatorOrNull()` and `hasTerminator()` both
+   arrived in **LLVM 22**, so against 21 neither exists to patch in — and neither is needed, because
+   the behaviour change that motivated the patch is also LLVM 22's.
+
+Two smaller traps: `git fetch --tags` in the image's shallow clone tries to fetch every tag in the
+repository and looks like a hang (`git fetch --depth 1 origin tag v0.59.0` is the fix), and `pixi add`
+has no `--dry-run` — it prints what it resolves, which is the useful part.
+
+The runtime `.mod` files come from the native build of the same commit rather than from
+`wasm-build0.sh`, which does not exist at this ref. They are generated by an *unpatched* native build
+and so say `0.59.0`, which is why the build script's `-dirty` strip matters: a compiler that reports
+`0.59.0-dirty` refuses to load them, and every program that touches `use iso_fortran_env` or `open`
+dies with `Incompatible format`.
+
+## 14. The artifact, and what is left
+
+`docker/lfortran-wasm/out-059/`, built from v0.59.0 against LLVM 21:
+
+| asset | bytes |
+| --- | --- |
+| `wasm_run.wasm` | 57,186,792 (54.5 MiB) |
+| `wasm_run.js` | 566,837 |
+| `wasm_run.data` | 72,569 |
+
+54.5 MiB against 63.70 MiB for the `v0.66.0` build this package shipped before — and, unlike the
+published wasm-backend builds, complete. It carries the `clearerr(stdin)` fix in
+`wasm-run-main.cpp`, so the stdin poisoning described in the package README is fixed in the artifact
+rather than worked around in the host.
+
+Verified so far: the compiler, natively, on the four cases above. **Not yet verified: the wasm module
+itself** — "linked cleanly" is not "runs correctly", and the four cases still have to be run through
+it. After that the assets get vendored, the loader goes back to the `run_fortran` shape (the artifact
+is the LLVM backend with our own entry point, not an official build's `emit_wasm_from_source`), and the
+package is republished.
+
+The loader written to drive the *official* builds — `cwrap` plus the WASI runner — is kept as a tool
+rather than deleted: it is how the ladder in §11 was measured, and how any future published build can
+be assessed without building anything. `docker/lfortran-wasm/capabilities.mjs` reports a build's
+feature support one case at a time, and `pipeline.mjs` runs a single program through any build in
+`<type>/<commit>` form.
+
+One methodological note, because it cost real time and would cost the next person the same: **check
+output, not exit codes.** Two of the corpus cases this repository runs with only `exitCode === 0`
+passed while printing nothing at all, and the loop regression was found only after every assertion was
+tightened to compare stdout. A silent compiler and a working one are indistinguishable by exit code,
+and the silent one is the harder bug.

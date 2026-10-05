@@ -89,11 +89,37 @@ else
     pixi run -e wasm-build bash -c "PREFIX=$PREFIX ./wasm-build0.sh"
 fi
 
-echo "=== 3/4  pinning llvm to the 22.x line LFortran v0.65.0 targets ==="
-# `llvm = "*"` in pixi.toml resolves to 23.1.2 as of today, and LLVM's C++ API breaks between major
-# versions, so LFortran v0.65.0 — whose own pixi.toml pins llvmdev 22.x — would not compile against
-# it. 22.1.8 is the newest 22.x the emscripten-forge channel publishes.
-pixi add -e wasm-host "llvm==22.1.8"
+echo "=== 3/4  pinning llvm to the line this ref targets ==="
+# `llvm = "*"` in pixi.toml resolves to whatever the channel has newest (23.1.2 as of today), and
+# LLVM's C++ API breaks between major versions, so a ref must be built against the line its own
+# pixi.toml names: v0.65.0/v0.66.0 list llvmdev 22.x, and v0.59.0 lists 21.1.2. This is a parameter,
+# not a constant, because building a different ref is exactly how we tell a bug in our build
+# configuration from a bug in LFortran — and getting it wrong fails for LLVM reasons, which looks
+# like a Fortran failure and wastes a long build.
+#
+#   docker run -e LLVM_VERSION=21.1.2 ... bash /try-newer-ref.sh v0.59.0
+#
+# Default is the 22.x line the pinned ref targets. Check the ref's own pixi.toml before changing the
+# ref: `llvmdev = "==X.Y.Z"` for the highest `[feature.llvmNN]` it declares.
+# A pixi *spec*, not a bare version: a ref's LLVM line may have no exact build on the wasm channel.
+# 0.59.0 targets LLVM 21, and "llvm==21.1.2" fails to solve for emscripten-wasm32 while
+# "llvm>=21,<22" resolves. Default is the exact 22.x build the pinned ref targets.
+#
+#   docker run -e LLVM_SPEC='llvm>=21,<22' ... bash /try-newer-ref.sh v0.59.0
+#
+# Check the ref's own pixi.toml before changing the ref: `llvmdev = "==X.Y.Z"` for the highest
+# `[feature.llvmNN]` it declares.
+LLVM_SPEC="${LLVM_SPEC:-llvm==22.1.8}"
+echo "LLVM_SPEC=$LLVM_SPEC"
+pixi add -e wasm-host "$LLVM_SPEC"
+# `pixi add` only edits the manifest — the environment has to be installed for it to take effect. The
+# image is built with whatever the Dockerfile's ref uses, so when a ref's LLVM line differs, skipping
+# this links against the image's LLVM and the failure looks like a Fortran problem. It did:
+#
+#   llvm_utils.h: no member named 'CreateGlobalStringPtr' in 'llvm::IRBuilder<>'
+#
+# which is LLVM 22's API, while 0.59.0 targets LLVM 21. A no-op when the versions already agree.
+pixi install -e wasm-host --platform emscripten-wasm32
 
 echo "=== 4/4  adding the entry point and cross-compiling ==="
 cp /wasm-run-main.cpp src/bin/wasm_run_main.cpp
@@ -208,22 +234,30 @@ fi
 # rebuild to two object files instead of most of the tree.
 # Applied only when absent: rewriting the files resets their timestamps and makes ninja rebuild both
 # translation units (asr_to_llvm.cpp is the slowest object in the tree) for no reason on a re-run.
-if grep -q "getTerminatorOrNull" src/libasr/codegen/asr_to_llvm.cpp; then
+# Only from LLVM 22. That is the release where getTerminator() began assuming a well-formed block and
+# getTerminatorOrNull()/hasTerminator() appeared; against LLVM 21 the original test is already correct
+# and neither replacement function exists. Set TERMINATOR_PATCH=0 for a ref built against LLVM 21.
+if [ "${TERMINATOR_PATCH:-1}" != "1" ]; then
+    echo "terminator patch disabled for this build (LLVM_SPEC=$LLVM_SPEC) — not needed before LLVM 22"
+elif grep -q "hasTerminator() ? " src/libasr/codegen/asr_to_llvm.cpp; then
     echo "getTerminator patch already applied, leaving those objects alone"
 else
     git checkout -- src/libasr/codegen/asr_to_llvm.cpp src/libasr/codegen/llvm_utils.cpp
-    sed -i 's|llvm::Instruction \*block_terminator = last_bb->getTerminator();|llvm::Instruction *block_terminator = last_bb->getTerminatorOrNull();|' \
+    # Written as an explicit test rather than with getTerminatorOrNull(), which LLVM only gained in 22:
+    # against 21 that does not compile ("no member named 'getTerminatorOrNull'"), and this is the same
+    # semantics on both.
+    sed -i 's|llvm::Instruction \*block_terminator = last_bb->getTerminator();|llvm::Instruction *block_terminator = last_bb->hasTerminator() ? last_bb->getTerminator() : nullptr;|' \
         src/libasr/codegen/asr_to_llvm.cpp src/libasr/codegen/llvm_utils.cpp
     for f in src/libasr/codegen/asr_to_llvm.cpp src/libasr/codegen/llvm_utils.cpp; do
-        if ! grep -q "getTerminatorOrNull" "$f"; then
+        if ! grep -q "hasTerminator() ?" "$f"; then
             # Not fatal: a source that no longer calls getTerminator() as a test needs no patch, which
             # is the good outcome and worth saying out loud rather than failing over.
             echo "NOTE: the getTerminator patch did not apply — this source no longer uses that call"
             continue
         fi
     done
-    if grep -q "getTerminatorOrNull" src/libasr/codegen/asr_to_llvm.cpp; then
-        echo "patched getTerminator() -> getTerminatorOrNull() in both start_new_block helpers"
+    if grep -q "hasTerminator() ?" src/libasr/codegen/asr_to_llvm.cpp; then
+        echo "patched getTerminator() -> hasTerminator() ? getTerminator() : nullptr in both helpers"
     fi
 fi
 
@@ -242,8 +276,24 @@ fi
 
 # The flags from wasm-build1.sh, minus the kernel: XEUS_LFORTRAN_WASM_BUILD off so xeus is never
 # looked for, and LFORTRAN_BUILD_TO_WASM off so the emit-only CLI is not built either.
+#
+# HAVE_BUILD_TO_WASM is defined explicitly, which is what that option would do for the sources.
+# LFortran guards a 32-bit portability assert with it, and it *fails* without the define on wasm32:
+#
+#   parser_stype.h:106: static assertion failed due to requirement
+#   'sizeof(LCompilers::LFortran::YYSTYPE) == sizeof(LCompilers::LFortran::Vec<...ast_t *>)'
+#
+# where the source reads:
+#
+#   #if !defined(HAVE_BUILD_TO_WASM) && !defined(__ppc__)
+#   static_assert(sizeof(YYSTYPE) == sizeof(Vec<AST::ast_t*>));
+#   #endif
+#
+# The equality holds on 64-bit hosts and not on wasm32, which upstream knows and handles. Defining
+# only the macro, rather than turning the option on, keeps the CLI target out of the build.
 pixi run -e wasm-build bash -c "PREFIX=$PREFIX emcmake cmake -S . -B build-wasm -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CXX_FLAGS='-DHAVE_BUILD_TO_WASM' \
     -DLFORTRAN_BUILD_ALL=no \
     -DWITH_LLVM=yes \
     -DXEUS_LFORTRAN_WASM_BUILD=no \

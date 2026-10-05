@@ -139,9 +139,21 @@ do i = 1, 3
 end do
 end program
 `,
+	// The starter template's own program, so what users first see is covered by the probe. It prints a
+	// title line and then a counter, which the template's markup splits out.
+	'starter program (counter)': `program counter
+implicit none
+integer :: count
+
+print *, 'Fortran'
+
+read *, count
+count = count + 1
+print *, count
+end program
+`,
 };
 
-// Input fed to the one case that reads stdin, keyed by case name.
 // What each program must and must not print. Asserting only on the exit code let a case that printed
 // nothing pass as OK, so these are checked too.
 export const EXPECT = {
@@ -161,10 +173,13 @@ export const EXPECT = {
 	'statements, no program unit': { expect: ['5'] },
 	'statements, implicit program': { expect: ['3.50000000'] },
 	'print inside a loop': { expect: ['1', '2', '3'] },
+	'starter program (counter)': { expect: ['Fortran', '0'] },
 };
 
 export const STDIN = {
 	'READ from stdin': '20\n22\n',
+	// The starter's markup seeds the counter with -1, so the first run prints 0.
+	'starter program (counter)': '-1\n',
 };
 
 export function stdinFor(name) {
