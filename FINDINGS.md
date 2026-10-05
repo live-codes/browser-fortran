@@ -589,11 +589,52 @@ published wasm-backend builds, complete. It carries the `clearerr(stdin)` fix in
 `wasm-run-main.cpp`, so the stdin poisoning described in the package README is fixed in the artifact
 rather than worked around in the host.
 
-Verified so far: the compiler, natively, on the four cases above. **Not yet verified: the wasm module
-itself** — "linked cleanly" is not "runs correctly", and the four cases still have to be run through
-it. After that the assets get vendored, the loader goes back to the `run_fortran` shape (the artifact
-is the LLVM backend with our own entry point, not an official build's `emit_wasm_from_source`), and the
-package is republished.
+Verified: the compiler, natively, on the four cases above. **Not verified: the wasm module — and it
+cannot be made to work at this ref.** The build links and loads, but every program traps, and the
+reason is not a bug that can be configured away: **v0.59.0 has no wasm run path.**
+
+Three things establish that, and the last is the decisive one:
+
+- The only references to `WasmLFortranExecutor` anywhere in that source tree are in **files this work
+  added** — the entry point and the CMake block appended to `src/bin/CMakeLists.txt`. The class itself
+  is not there.
+- The ref's own wasm target (`src/bin/CMakeLists.txt`, its `HAVE_BUILD_TO_WASM` branch) is the
+  *emit-only CLI*: `-fexceptions`, `-Oz`, `-sASSERTIONS`, **`--no-entry`**, and no `MAIN_MODULE`.
+- `src/libasr/codegen/evaluator.cpp` at that ref contains only `llvm::orc::ExecutorSymbolDef` — the
+  **ORC JIT**. A JIT needs executable memory, which wasm does not have. The FortranEvaluator tests
+  upstream say as much: every one of them sits outside the `#ifndef __EMSCRIPTEN__` guard that
+  excludes the ORC JIT tests.
+
+So `evaluate()` with `interactive = true` reaches for a run path that does not exist at this ref, and
+traps with `null function or function signature mismatch` — which is what calling a null executor
+looks like. The wasm executor arrived in a later release; the loop regression arrived in 0.60.0. Since
+one is missing at 0.59 and the other is broken from 0.60 onward, **no published ref has both a working
+loop print and the ability to run a program in wasm.**
+
+### What the bisect did establish, and fix
+
+Getting that far required three fixes, each verified by a rebuild rather than by reading, and each the
+same shape — an initialisation upstream's own `main()` performs that a browser host has to perform for
+itself:
+
+1. **The LLVM target registry was never populated.** `TargetRegistry::lookupTarget` returned null and
+   v0.59.0's `evaluator.cpp:247` dereferences it without checking (`0.66.0` has an error argument and a
+   `validate_cpu` family there). Registering the targets in the entry point removed it — verified by the
+   trap *moving*, and by the evaluator's constructor no longer reproducing those deep LLVM frames.
+2. **`lm.files` was empty.** The parse path reads `lm.files.back().in_filename`; `back()` on an empty
+   vector is undefined behaviour. This is why the trap was input-independent — `""`, `"end program"`, a
+   comment and a hello-world all trapped at the byte-identical address `0xb5a3a8`: nothing about the
+   program was involved. Registering a file, as `evaluate2()` does, fixed it and moved the failure
+   several frames deeper into compilation.
+3. **A file must be pushed *before* `init_simple`, not after.** `init_simple` reads `files.back()`
+   itself, so calling it on an empty manager is the same undefined behaviour one level up.
+
+Only after all three did the compiler get as far as the run, which is where the missing executor showed
+itself. Each step was confirmed by the *stack* changing and the artifact hash changing — not by size,
+which coincided once and would have given the wrong answer.
+
+The lesson from §11 applies with force here: a clean link is not a working module, and only running it
+says which.
 
 The loader written to drive the *official* builds — `cwrap` plus the WASI runner — is kept as a tool
 rather than deleted: it is how the ladder in §11 was measured, and how any future published build can

@@ -168,8 +168,10 @@
       .runtime { text-align: right; margin-left: auto; }
     </style>
     <!--
-      The compiler, straight from the CDN — this page has no build step and no vendor mount, and no
-      import map: main.js imports the published package by URL, which is also how a worker does it.
+      The compiler is the package in this repository — `packages/lfortran-wasm` — imported by path
+      rather than from a CDN, with no build step and no import map. `serve.js` maps `/packages/` onto
+      the repository so the page can reach it, and the package resolves its own vendored wasm from its
+      `assets/` beside it, so the page needs no configuration at all.
 
       Nothing has to be shimmed here. The previous f2c + Clang pipeline needed a fake
       `SharedArrayBuffer` global because the WASI host tested `x instanceof SharedArrayBuffer`; this

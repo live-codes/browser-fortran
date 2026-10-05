@@ -1,16 +1,18 @@
-import { createCompiler } from 'https://cdn.jsdelivr.net/npm/@live-codes/lfortran-wasm@0.1.0/src/index.js';
+import { createCompiler } from '/packages/lfortran-wasm/src/index.js';
 
 /**
  * A page around `@live-codes/lfortran-wasm`.
  *
- * The compiler is the package's, imported by URL from jsDelivr. This file is only the harness —
- * examples, a Run button, two output panes, and the timings the browser probes read back — so
- * everything about compiling Fortran lives in one place, and a LiveCodes language module would use
- * the same package the same way.
+ * The compiler is the package in this repository — `packages/lfortran-wasm` — imported by path, so
+ * what this page exercises is the working tree rather than whatever is on the CDN. `serve.js` maps
+ * `/packages/` onto the repository, and the package resolves its own wasm from its `assets/` beside
+ * it, so nothing here has to say where the assets are.
  *
- * The package resolves its own wasm relative to itself, so no configuration is needed: the default
- * below is what the published package serves. `?baseUrl=` points it at a mirror, or at the output of
- * a local container build (`?baseUrl=/docker/lfortran-wasm/out/`).
+ * This file is only the harness: examples, a Run button, two output panes, and the timings the
+ * browser probes read back. Everything about compiling Fortran lives in the package, and a LiveCodes
+ * language module would use the same package the same way.
+ *
+ * `?baseUrl=` points the loader somewhere else — a CDN build, or `docker/lfortran-wasm/out-059/`.
  */
 
 const EXAMPLES = [
@@ -123,13 +125,16 @@ end program
 
 function resolveBaseUrl() {
   const override = (new URLSearchParams(location.search).get('baseUrl') ?? '').trim();
-  const fallback = 'https://cdn.jsdelivr.net/npm/@live-codes/lfortran-wasm@0.1.0/assets/';
-  const base = override === '' ? fallback : override;
+  if (override === '') {
+    // No option: the package uses the assets beside it, in this repository.
+    return { baseUrl: undefined, isOverride: false, label: 'packages/lfortran-wasm/assets/ (default)' };
+  }
   // The loader needs an absolute URL for its assets, so a relative override is resolved against the
-  // page — which is what makes a same-origin mirror like /docker/lfortran-wasm/out/ work.
+  // page — which is what makes a same-origin directory like /docker/lfortran-wasm/out-059/ work.
   return {
-    baseUrl: new URL(base.endsWith('/') ? base : `${base}/`, location.href).href,
-    isOverride: override !== '',
+    baseUrl: new URL(override.endsWith('/') ? override : `${override}/`, location.href).href,
+    isOverride: true,
+    label: override,
   };
 }
 
@@ -187,14 +192,14 @@ function loadExample(index) {
 }
 
 /**
- * The compiler is 19 MiB compressed, so it is created on first use and then reused. Files in memory
- * are per run; the module itself is not.
+ * The compiler is 16 MiB compressed, so it is created on first use and then reused. Programs are per
+ * run; the loaded module is not.
  */
 async function ensureCompiler() {
   if (compiler) return compiler;
 
   setStatus('loading', 'loading compiler…', 'busy');
-  setProgress('Downloading the LFortran compiler (about 19 MiB compressed)…');
+  setProgress('Downloading the LFortran compiler (about 16 MiB compressed)…');
   const started = performance.now();
 
   compiler = await createCompiler({ baseUrl: mirror.baseUrl });
@@ -265,7 +270,7 @@ el.editor.addEventListener('keydown', (event) => {
   }
 });
 
-el.baseUrl.textContent = mirror.baseUrl;
+el.baseUrl.textContent = mirror.label;
 el.baseOverride.textContent = mirror.isOverride ? '(from ?baseUrl)' : '(default)';
 document.documentElement.dataset.status = 'ready';
 loadExample(0);

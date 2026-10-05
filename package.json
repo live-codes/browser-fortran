@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Client-side Fortran playground: compiles and runs Fortran in the browser via f2c and Clang compiled to WebAssembly.",
+  "description": "Client-side Fortran playground: compiles and runs modern Fortran in the browser on LFortran's LLVM backend compiled to WebAssembly.",
   "license": "MIT",
   "scripts": {
     "start": "node serve.js 8127 public",

@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <string>
 
+#include <llvm/Support/TargetSelect.h>
 #include <lfortran/fortran_evaluator.h>
 #include <lfortran/utils.h>
 #include <libasr/diagnostics.h>
@@ -67,18 +68,75 @@ KEEPALIVE char *run_fortran(char *input) {
     // be written out and linked elsewhere.
     compiler_options.interactive = true;
 
+    // Upstream's CLI calls this on its first line, before anything else, and this entry point did not
+    // — the same class of omission as the target registration below. What it sets up is libasr-wide,
+    // and without it the parser traps on *any* input, including the empty string, at a fixed address:
+    //
+    //   run_fortran THREW  memory access out of bounds
+    //     at wasm-function[3924]:0xb5a3a8
+    //
+    // The same address for "", "end program", a comment and a hello-world, which is what says the
+    // fault is in the parser's setup rather than in anything about the program.
+    LCompilers::initialize();
+
+    // The evaluator resolves its target through TargetRegistry::lookupTarget, which only knows the
+    // targets that have been registered, and registering them is the *host* program's job: upstream's
+    // CLI does it in main(). A browser host never runs main(), it calls run_fortran, so nothing had
+    // registered them — so the lookup returned null, and v0.59.0 dereferences it without checking:
+    //
+    //   evaluator.cpp:238  const llvm::Target *target = llvm::TargetRegistry::lookupTarget(triple, Error);
+    //   evaluator.cpp:247  TM = target->createTargetMachine(triple, CPU, features, opt, RM);
+    //
+    // which is "memory access out of bounds" a few frames into the evaluator's constructor. v0.66.0
+    // does not crash there because that release has an error argument and a validate_cpu family around
+    // the same calls — which is why this only bites the older ref.
+    //
+    // Once, on the first call: initialising twice is harmless but pointless.
+    static const bool targets_registered = [] {
+        llvm::InitializeAllTargetInfos();
+        llvm::InitializeAllTargets();
+        llvm::InitializeAllTargetMCs();
+        llvm::InitializeAllAsmParsers();
+        llvm::InitializeAllAsmPrinters();
+        return true;
+    }();
+    (void)targets_registered;
+
     LCompilers::FortranEvaluator fe(compiler_options);
 
     // Not evaluate2(): that wraps this call and discards the diagnostics, keeping only an empty
     // `Error` struct in the Result (libasr/exception.h is explicit that "we do not currently store
     // anything in the Error structure"). Owning them here is the only way a failure is visible.
     LCompilers::LocationManager lm;
+    // A file has to be registered, *then* initialised, and upstream does both for exactly this reason.
+    // The parse path reads the last file out of the manager:
+    //
+    //   include_dirs.push_back(parent_path(lm.files.back().in_filename));
+    //
+    // and init_simple reads it too:
+    //
+    //   void init_simple(const std::string &input) {
+    //       files.back().out_start = {0, input.size()};
+    //       ...
+    //
+    // so back() on an empty vector is undefined behaviour in either place. That is the "memory access
+    // out of bounds" this entry point kept hitting, at the same address for "", "end program", a
+    // comment and a hello-world: nothing about the program was involved, only that lm.files was empty.
+    // This is what evaluate2() does — push a FileLocations named "input", then evaluate.
+    const std::string source(input);
+    LCompilers::LocationManager::FileLocations fl;
+    fl.in_filename = "input";
+    lm.files.push_back(fl);
+    lm.init_simple(source);
+
     LCompilers::PassManager lpm;
     lpm.use_default_passes();
     LCompilers::diag::Diagnostics diagnostics;
 
+    // The same string that was registered with the location manager, so the file it knows about and
+    // the code being compiled are one and the same.
     LCompilers::Result<LCompilers::FortranEvaluator::EvalResult> r =
-        fe.evaluate(std::string(input), false, lm, lpm, diagnostics);
+        fe.evaluate(source, false, lm, lpm, diagnostics);
 
     if (r.ok) {
         result = "0";

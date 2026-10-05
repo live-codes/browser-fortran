@@ -93,6 +93,23 @@ against 63.70 MiB for the `v0.66.0` build this package shipped before, and it ca
 Only Fortran users pay for the download, and the Clang half of the older package is shared with
 LiveCodes' C/C++ toolchain rather than duplicated.
 
+## Demo
+
+```bash
+npm start          # → http://localhost:8127/
+```
+
+`public/` is two files, and it does **not** use either package's sources. `main.js` imports
+`@live-codes/lfortran-wasm` **by URL from jsDelivr** — the published package, currently `0.1.0` — and
+the package resolves its own wasm from its own `assets/` there. That is deliberate: it is the same way
+a LiveCodes language module would load it, so what the demo exercises is the published artifact rather
+than a working tree. As a consequence the demo trails this repository — `0.1.0` is published, `0.2.0`
+is in the working tree, and the 0.59.0 artifact below is not vendored yet.
+
+`?baseUrl=` points it at a mirror instead, including the output of a container build. `npm start`
+serves `public/` as the root, so a repository-relative path like `?baseUrl=/docker/lfortran-wasm/out/`
+needs `node serve.js 8127 .` to resolve.
+
 ## Building the artifact
 
 The toolchain lives in a Docker image; only the LFortran build runs in a container, so the long part can
@@ -163,11 +180,37 @@ supported.
 
 ## Status
 
-The 0.59.0 LLVM-backend wasm is **built and its artifacts are copied out**; the compiler itself is
-verified natively on the four cases above. What remains is to run those cases through the wasm module,
-vendor the assets, and republish — plus switch the package's loader back to the `run_fortran` shape,
-since the artifact is the LLVM backend with our own entry point rather than an official build's
-`emit_wasm_from_source`.
+The 0.59.0 LLVM-backend wasm **builds**, and its compiler is verified natively on the four cases above.
+**It cannot be made to run programs, because that ref has no wasm run path.** Three independent facts
+say so: the only references to `WasmLFortranExecutor` in that tree are in files this work added; the
+ref's own wasm target is the emit-only CLI (`--no-entry`, no `MAIN_MODULE`); and `evaluator.cpp` there
+contains only the **ORC JIT**, which needs executable memory and so cannot exist in wasm — upstream's
+FortranEvaluator tests are all excluded under emscripten for that reason. `evaluate()` with
+`interactive = true` therefore reaches for a null run path and traps with `null function or function
+signature mismatch`.
+
+The wasm executor arrived later; the loop regression arrived in 0.60.0. **So no published ref both
+prints in a loop and runs a program in wasm**, and neither route alone is sufficient:
+
+| | runs a program in wasm | full language | loop print |
+| --- | --- | --- | --- |
+| 0.59.0 wasm backend | yes | **no** — no derived types, array sections, allocatables, stdin | yes |
+| 0.59.0 LLVM backend | **no** — no run path at that ref | yes | yes (natively) |
+| 0.66.0 LLVM backend (= `0.2.0`) | yes | yes | **no** — upstream regression |
+
+Getting the 0.59.0 build as far as it went needed three fixes, each an initialisation upstream's
+`main()` performs and a browser host must perform itself — the LLVM target registry, a registered
+`LocationManager` file before the parse path reads `lm.files.back()`, and the same file pushed *before*
+`init_simple` reads it. Those are recorded in FINDINGS.md §14, and the fixes are in
+`docker/lfortran-wasm/wasm-run-main.cpp`.
+
+The demo runs on the shipped v0.66.0 build and loads it **from this repository** rather than a CDN
+(`serve.js` serves `/packages/`). Verified in a browser: hello world and the derived-types example run
+correctly, and the `DO` loop example exits 0 with no output — the regression, reproduced live.
+
+So the remaining work is not in this repository: the loop print is an upstream codegen regression, and
+the precise repro is in §11 — `1 2 3` at 0.59.0, nothing from 0.60.0 through current `main`, on both
+backends.
 
 ## License
 
