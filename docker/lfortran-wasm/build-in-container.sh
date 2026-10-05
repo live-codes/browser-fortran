@@ -237,27 +237,35 @@ fi
 # Only from LLVM 22. That is the release where getTerminator() began assuming a well-formed block and
 # getTerminatorOrNull()/hasTerminator() appeared; against LLVM 21 the original test is already correct
 # and neither replacement function exists. Set TERMINATOR_PATCH=0 for a ref built against LLVM 21.
-if [ "${TERMINATOR_PATCH:-1}" != "1" ]; then
-    echo "terminator patch disabled for this build (LLVM_SPEC=$LLVM_SPEC) — not needed before LLVM 22"
-elif grep -q "hasTerminator() ? " src/libasr/codegen/asr_to_llvm.cpp; then
+if [ "${TERMINATOR_PATCH:-0}" != "1" ]; then
+    echo "terminator patch disabled for this build (LLVM_SPEC=$LLVM_SPEC) — not needed with this pin"
+    # Restore them, because an earlier run may have applied the patch and skipping it must leave the
+    # source *unpatched* rather than half-patched. Both spellings the patch has used —
+    # getTerminatorOrNull() and hasTerminator() — are missing from LLVM 22.1.8 and from 21, so with this
+    # pin the patch never compiles and is never needed; the original getTerminator() test is correct at
+    # both. It is kept for refs built against LLVM 23, where the helper does exist.
+    git checkout -- src/libasr/codegen/asr_to_llvm.cpp src/libasr/codegen/llvm_utils.cpp
+elif grep -q "getTerminatorOrNull" src/libasr/codegen/asr_to_llvm.cpp; then
     echo "getTerminator patch already applied, leaving those objects alone"
 else
     git checkout -- src/libasr/codegen/asr_to_llvm.cpp src/libasr/codegen/llvm_utils.cpp
-    # Written as an explicit test rather than with getTerminatorOrNull(), which LLVM only gained in 22:
-    # against 21 that does not compile ("no member named 'getTerminatorOrNull'"), and this is the same
-    # semantics on both.
-    sed -i 's|llvm::Instruction \*block_terminator = last_bb->getTerminator();|llvm::Instruction *block_terminator = last_bb->hasTerminator() ? last_bb->getTerminator() : nullptr;|' \
+    # getTerminatorOrNull() is the spelling for LLVM 22, where getTerminator() began assuming a
+    # well-formed block and that helper appeared alongside it. LLVM 21 has neither it nor
+    # hasTerminator() — measured, both fail to compile — which is why a build against 21 sets
+    # TERMINATOR_PATCH=0 and needs no patch at all, and why an explicit hasTerminator() test is not a
+    # version-agnostic alternative: 22.1.8 does not have it either.
+    sed -i 's|llvm::Instruction \*block_terminator = last_bb->getTerminator();|llvm::Instruction *block_terminator = last_bb->getTerminatorOrNull();|' \
         src/libasr/codegen/asr_to_llvm.cpp src/libasr/codegen/llvm_utils.cpp
     for f in src/libasr/codegen/asr_to_llvm.cpp src/libasr/codegen/llvm_utils.cpp; do
-        if ! grep -q "hasTerminator() ?" "$f"; then
+        if ! grep -q "getTerminatorOrNull" "$f"; then
             # Not fatal: a source that no longer calls getTerminator() as a test needs no patch, which
             # is the good outcome and worth saying out loud rather than failing over.
             echo "NOTE: the getTerminator patch did not apply — this source no longer uses that call"
             continue
         fi
     done
-    if grep -q "hasTerminator() ?" src/libasr/codegen/asr_to_llvm.cpp; then
-        echo "patched getTerminator() -> hasTerminator() ? getTerminator() : nullptr in both helpers"
+    if grep -q "getTerminatorOrNull" src/libasr/codegen/asr_to_llvm.cpp; then
+        echo "patched getTerminator() -> getTerminatorOrNull() in both start_new_block helpers"
     fi
 fi
 

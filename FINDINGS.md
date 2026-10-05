@@ -576,7 +576,9 @@ dies with `Incompatible format`.
 
 ## 14. The artifact, and what is left
 
-`docker/lfortran-wasm/out-059/`, built from v0.59.0 against LLVM 21:
+`docker/lfortran-wasm/out-066b/`, built from v0.66.0 against LLVM 22.1.8 with one pass skipped
+(the v0.59.0 artifacts this section originally listed were removed — that path was abandoned, see the
+end of this section):
 
 | asset | bytes |
 | --- | --- |
@@ -635,6 +637,51 @@ which coincided once and would have given the wrong answer.
 
 The lesson from §11 applies with force here: a clean link is not a working module, and only running it
 says which.
+
+### Resolution: it is the `print_arr` pass, and skipping it costs nothing
+
+The pass list turned out to be bisectable **at runtime**, without rebuilding. `PassManager` has one
+public lever for it — `passes_to_skip_with_llvm`, which `parse_pass_arg()` folds into `_skip_passes` and
+`apply_passes()` honours — so the entry point reads `/skip.txt` from the wasm filesystem before every
+run. The whole bisect is then one process, milliseconds per attempt.
+
+Against a self-built 0.66.0 LLVM-backend module, skipping one pass at a time through all thirty-seven
+defaults:
+
+```
+FIXED     skip print_arr                                stdout="1 2 3"
+still no  skip implied_do_loops                         stdout=""
+still no  skip array_op                                 stdout=""
+… thirty-four more, all still nothing …
+```
+
+Exactly one pass is responsible, and skipping it loses nothing. Measured case by case, with and without:
+
+| case | default | `print_arr` skipped |
+| --- | --- | --- |
+| `print *` in a `do` loop | **nothing** | **`1 2 3`** |
+| mixed list (`'a(', i, ') =', a(i)`) in a loop | **nothing** | **prints** |
+| whole-array print | `10.0000000 20.0000000 …` | identical |
+| array section | `20.0000000 30.0000000` | identical |
+| allocatable array print | `7 7 7` | identical |
+| derived type | `7.00000000` | identical |
+| hello | `hello` | identical |
+
+Every array case is byte-identical with the pass skipped, because `print_list_tuple` already covers
+them. That is consistent with the source difference: between 0.59.0 and 0.60.0 the only print-related
+pass that changed is `print_arr.cpp`, which gained implied-do-loop expansion
+(`expand_implied_do_loop`, `ReplaceLoopVar`) — a redundancy that is also wrong.
+
+The shipping artifact is therefore a 0.66.0 LLVM-backend wasm with that one pass skipped, verified end
+to end through the package's own `createCompiler`/`run` loader — hello, a `do` loop with `print *`, a
+mixed list inside a loop, whole-array print, array section, allocatable array, derived type member
+access, `read` from stdin, and a compile error reported rather than thrown: **9 passed, 0 failed**.
+
+61.84 MiB of wasm, 17.31 MiB gzipped, against 19.21 MiB for the build it replaces.
+
+Two consequences worth stating plainly. **The regression does not have to be fixed upstream for a
+playground to ship** — it can be configured around. And the 0.59.0 LLVM path stays abandoned: that ref
+has no wasm run path, so no amount of configuration makes it work.
 
 The loader written to drive the *official* builds — `cwrap` plus the WASI runner — is kept as a tool
 rather than deleted: it is how the ladder in §11 was measured, and how any future published build can

@@ -78,10 +78,10 @@ artifact that is both is one we build ourselves. Verified natively at that tag (
 === read from stdin ===                               42
 ```
 
-The wasm build of the same source is in `docker/lfortran-wasm/out-059/` —
-`wasm_run.wasm` 57,186,792 bytes, `wasm_run.js` 566,837, `wasm_run.data` 72,569. That is 54.5 MiB raw,
-against 63.70 MiB for the `v0.66.0` build this package shipped before, and it carries the stdin fix
-(fd 0 plus `clearerr`, below).
+The wasm build of the same source is in `docker/lfortran-wasm/out-066b/` — 61.84 MiB raw, 17.31 MiB
+gzipped, vendored into the package. It is built from v0.66.0 with one pass skipped, which is what makes
+the loop print work; see the resolution below. (The v0.59.0 artifacts this section used to point at were
+removed — that path was abandoned, because that ref has no wasm run path.)
 
 ## Packages
 
@@ -189,14 +189,50 @@ FortranEvaluator tests are all excluded under emscripten for that reason. `evalu
 `interactive = true` therefore reaches for a null run path and traps with `null function or function
 signature mismatch`.
 
-The wasm executor arrived later; the loop regression arrived in 0.60.0. **So no published ref both
-prints in a loop and runs a program in wasm**, and neither route alone is sufficient:
+The wasm executor arrived later; the loop regression arrived in 0.60.0. Neither route alone is
+sufficient — but a third does work, and it is what ships:
 
 | | runs a program in wasm | full language | loop print |
 | --- | --- | --- | --- |
 | 0.59.0 wasm backend | yes | **no** — no derived types, array sections, allocatables, stdin | yes |
 | 0.59.0 LLVM backend | **no** — no run path at that ref | yes | yes (natively) |
-| 0.66.0 LLVM backend (= `0.2.0`) | yes | yes | **no** — upstream regression |
+| 0.66.0 LLVM backend, as published (= `0.2.0`) | yes | yes | **no** |
+| **0.66.0 LLVM backend with `print_arr` skipped** | **yes** | **yes** | **yes** |
+
+**The loop regression is one pass, and it can be skipped at runtime.** `PassManager` exposes
+`passes_to_skip_with_llvm`, which `parse_pass_arg()` folds into `_skip_passes` and `apply_passes()`
+honours, so our entry point reads `/skip.txt` from the wasm filesystem before each run — the entire
+bisect is then one process and milliseconds per attempt. Skipping one pass at a time through all
+thirty-seven defaults against a self-built 0.66.0 LLVM module:
+
+```
+FIXED     skip print_arr                                stdout="1 2 3"
+still no  skip implied_do_loops
+still no  skip array_op
+…thirty-four more, all still nothing…
+```
+
+**`print_arr` is the culprit and skipping it costs nothing.** Between 0.59.0 and 0.60.0 the only
+print-related pass that changed is `print_arr.cpp`, which gained implied-do expansion. With it skipped,
+the whole set is byte-identical or better:
+
+| case | default | `print_arr` skipped |
+| --- | --- | --- |
+| `print *` in a `do` loop | nothing | **`1 2 3`** |
+| mixed list in a loop | nothing | **prints** |
+| whole-array print / array section / allocatable / derived type | fine | **identical** |
+
+Verified end to end through the package's own loader:
+
+```
+OK  hello · do loop with print * · mixed list inside a loop · whole-array print · array section ·
+    allocatable array · derived type member access · read from stdin · compile error reported
+9 passed, 0 failed
+```
+
+61.84 MiB of wasm, 17.31 MiB gzipped — smaller than the 19.21 MiB it replaces. So the playground ships
+without waiting on upstream; reporting the regression is still worth doing, and is sharper now that the
+pass is known.
 
 Getting the 0.59.0 build as far as it went needed three fixes, each an initialisation upstream's
 `main()` performs and a browser host must perform itself — the LLVM target registry, a registered

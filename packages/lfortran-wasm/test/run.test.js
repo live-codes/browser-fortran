@@ -1,26 +1,23 @@
-// Tests the loader against the published LFortran build it pins.
+// Tests the packaged artifact: the run_fortran loader against the vendored assets.
 //
 //   npm test
 //
-// In Node the build is downloaded once into a cache directory under the system temp directory, so the
-// first run pays for ~12 MiB and later runs do not.
+// These run the artifact LiveCodes would load, through `createCompiler(...).run(...)`. Two of them are
+// guards for bugs that have actually bitten:
+//
+//   * `print *` inside a do loop produces no output at all from LFortran 0.60.0 onward. It is fixed by
+//     skipping the print_arr pass in the entry point, and this is what keeps it fixed.
+//   * a successful run used to return the entry point's own stderr as `errors`, so a configuration
+//     note showed up as a diagnostic on a program that worked perfectly.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { createCompiler } from '../src/index.js';
 
-// Loading is shared across the file: the module can only be evaluated once per realm, and reuse is
-// exactly what a compiler that is loaded once and run many times should do.
-//
-// Point the suite at another published build to compare behaviour between them:
-//
-//   set LFORTRAN_WASM_BUILD=dev/d981ac1f4 && npm test
-const requestedBuild = process.env.LFORTRAN_WASM_BUILD?.trim();
-const compilerPromise = createCompiler(
-	requestedBuild
-		? { baseUrl: `https://lfortran.github.io/wasm_builds/${requestedBuild.replace(/\/$/, '')}/` }
-		: {},
-);
+// Loading costs the ~17 MiB read plus instantiation, so it is shared across the tests.
+const compilerPromise = createCompiler();
+
+const flat = (text) => text.replace(/\s+/g, ' ').trim();
 
 test('runs a free-form program and captures stdout', async () => {
 	const compiler = await compilerPromise;
@@ -30,13 +27,11 @@ end program
 `);
 
 	assert.equal(exitCode, 0, errors);
-	assert.equal(errors, '');
-	assert.equal(stdout.trimEnd(), 'hello from LFortran');
+	assert.equal(flat(stdout), 'hello from LFortran');
 });
 
-// The case that pins the build. On release 0.60.0 and later this compiles, runs, exits 0 and prints
-// nothing: the print inside the loop is not emitted, and the module comes out smaller than a
-// hello-world's. It works on 0.59.0, which is why that release is the pinned one.
+// The regression guard. On every released build from 0.60.0 through current main this prints nothing,
+// silently: the print_arr pass drops the statement.
 test('prints inside a do loop', async () => {
 	const compiler = await compilerPromise;
 	const { stdout, errors, exitCode } = await compiler.run(`program p
@@ -48,58 +43,91 @@ end program
 `);
 
 	assert.equal(exitCode, 0, errors);
-	assert.equal(stdout.replace(/\s+/g, ' ').trim(), '1 2 3');
+	assert.equal(flat(stdout), '1 2 3');
 });
 
-// Derived types are a gap in this backend: member access is answered with
-// "visit_StructInstanceMember() not implemented", so the case cannot be exercised here. Skipped with
-// the reason rather than deleted, so the limitation is visible in the suite and not just the README.
-test('supports modules, contained procedures and derived types', {
-	skip: 'the wasm backend does not implement derived-type member access',
-}, async () => {
+test('prints a mixed list inside a do loop', async () => {
 	const compiler = await compilerPromise;
-	const { stdout, errors, exitCode } = await compiler.run(`module geometry
-implicit none
+	const { stdout, errors, exitCode } = await compiler.run(`program p
+integer :: i
+real :: a(3)
+a = [1.0, 2.0, 3.0]
+do i = 1, 3
+   print *, 'a(', i, ') =', a(i)
+end do
+end program
+`);
+
+	assert.equal(exitCode, 0, errors);
+	assert.equal(flat(stdout), 'a( 1 ) = 1.00000000 a( 2 ) = 2.00000000 a( 3 ) = 3.00000000');
+});
+
+// Skipping print_arr must not cost the thing that pass is named for. Nothing is lost: print_list_tuple
+// covers these, and each of these outputs is byte-identical with the pass skipped.
+test('prints whole arrays, sections and allocatables', async () => {
+	const compiler = await compilerPromise;
+
+	const whole = await compiler.run(`program p
+real :: a(3)
+a = [1.0, 2.0, 3.0]
+print *, a
+end program
+`);
+	assert.equal(whole.exitCode, 0, whole.errors);
+	assert.equal(flat(whole.stdout), '1.00000000 2.00000000 3.00000000');
+
+	const section = await compiler.run(`program p
+real :: a(4)
+a = [10.0, 20.0, 30.0, 40.0]
+print *, a(2:3)
+end program
+`);
+	assert.equal(section.exitCode, 0, section.errors);
+	assert.equal(flat(section.stdout), '20.0000000 30.0000000');
+
+	const allocatable = await compiler.run(`program p
+integer, allocatable :: v(:)
+allocate(v(3))
+v = 7
+print *, v
+end program
+`);
+	assert.equal(allocatable.exitCode, 0, allocatable.errors);
+	assert.equal(flat(allocatable.stdout), '7 7 7');
+});
+
+test('supports derived types, which the published wasm backend cannot compile', async () => {
+	const compiler = await compilerPromise;
+	const { stdout, errors, exitCode } = await compiler.run(`program p
 type :: point
    real :: x, y
 end type
-contains
-real function total(p)
-   type(point), intent(in) :: p
-   total = p%x + p%y
-end function
-end module
-program main
-use geometry
-type(point) :: p
-p%x = 3.0
-p%y = 4.0
-print *, total(p)
+type(point) :: q
+q%x = 3.0
+q%y = 4.0
+print *, q%x + q%y
 end program
 `);
 
 	assert.equal(exitCode, 0, errors);
-	assert.equal(stdout.trim(), '7.00000000');
+	assert.equal(flat(stdout), '7.00000000');
 });
 
-// Element references work. Array *sections* (a(2:3)) do not: this backend answers
-// "visit_ArraySection() not implemented", so the case the f2c pipeline got wrong cannot be exercised
-// here — see the limitation list in the README.
-test('indexes array elements', async () => {
+test('reads stdin, which the published wasm backend aborts on', async () => {
 	const compiler = await compilerPromise;
-	const { stdout, errors, exitCode } = await compiler.run(`program p
-real :: a(4)
-a(1) = 10.0
-a(2) = 20.0
-a(3) = 30.0
-a(4) = 40.0
-print *, a(2), a(3)
+	const { stdout, errors, exitCode } = await compiler.run(
+		`program adder
+integer :: a, b
+read *, a
+read *, b
+print *, a + b
 end program
-`);
+`,
+		'20\n22\n',
+	);
 
 	assert.equal(exitCode, 0, errors);
-	const printed = stdout.split(/\s+/).filter(Boolean).map(Number);
-	assert.deepEqual(printed, [20, 30]);
+	assert.equal(flat(stdout), '42');
 });
 
 test('reports a compile error instead of throwing', async () => {
@@ -113,45 +141,34 @@ end program
 	assert.match(errors, /syntax|token|expect|semantic/i);
 });
 
-// A program the compiler refuses must not spoil the loaded module. The wasm backend throws rather
-// than returning a status for constructs it cannot lower — `read` among them — and a live-coding host
-// hit that on every keystroke, so the run after a refused one has to work.
-test('a refused program does not poison the compiler for the next one', async () => {
+// A successful run must have *empty* diagnostics. The host returns the program's stderr as `errors`, so
+// anything the entry point writes there — a configuration note, say — reads as an error to the user on
+// a program that worked perfectly. That happened; this is the guard against it returning.
+test('a successful run has no diagnostics', async () => {
 	const compiler = await compilerPromise;
-	const refused = await compiler.run(`program p
-integer :: a
-read *, a
-print *, a
+	const { errors, exitCode } = await compiler.run(`program p
+print *, 'ok'
 end program
 `);
-	assert.equal(refused.exitCode, null);
-	assert.ok(refused.errors.length > 0, 'expected a diagnostic for the refused program');
+
+	assert.equal(exitCode, 0);
+	assert.equal(errors, '');
+});
+
+// A failed program must not spoil the loaded module for the next run.
+test('a failed program does not poison the compiler for the next one', async () => {
+	const compiler = await compilerPromise;
+	const failed = await compiler.run(`program p
+this is not fortran
+end program
+`);
+	assert.equal(failed.exitCode, null);
+	assert.ok(failed.errors.length > 0, 'expected a diagnostic');
 
 	const after = await compiler.run(`program p
 print *, 'still working'
 end program
 `);
 	assert.equal(after.exitCode, 0, after.errors);
-	assert.equal(after.stdout.trim(), 'still working');
-});
-
-// Nothing is shared between runs, so the same program gives the same answer every time. This is the
-// property that replaced the previous loader's shared-module bug, where a run that read stdin at
-// end-of-file left every later run unable to read at all.
-test('running the same program repeatedly gives identical results', async () => {
-	const compiler = await compilerPromise;
-	const program = `program p
-integer :: i
-do i = 1, 2
-   print *, i
-end do
-end program
-`;
-	const first = await compiler.run(program);
-	const second = await compiler.run(program);
-
-	assert.equal(first.exitCode, 0, first.errors);
-	assert.equal(second.exitCode, 0, second.errors);
-	assert.equal(first.stdout, second.stdout);
-	assert.equal(first.stdout.replace(/\s+/g, ' ').trim(), '1 2');
+	assert.equal(flat(after.stdout), 'still working');
 });

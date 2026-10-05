@@ -18,6 +18,7 @@
 
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #include <llvm/Support/TargetSelect.h>
 #include <lfortran/fortran_evaluator.h>
@@ -131,6 +132,41 @@ KEEPALIVE char *run_fortran(char *input) {
 
     LCompilers::PassManager lpm;
     lpm.use_default_passes();
+
+    // print_arr is skipped deliberately, and it is the reason list-directed output inside a do loop
+    // works here at all.
+    //
+    // LFortran 0.60.0 extended that pass with implied-do-loop expansion (expand_implied_do_loop and
+    // ReplaceLoopVar), and from that release onward `print *` inside a do loop is emitted as nothing:
+    // the program exits 0, prints nothing, and the module comes out smaller than a hello-world's —
+    // 644 bytes against 898. A pass-by-pass bisect through PassManager::passes_to_skip_with_llvm says
+    // this one is responsible and no other is: skipping print_arr restores `1 2 3`, skipping each of
+    // the other thirty-six passes does not.
+    //
+    // Nothing is lost by skipping it, measured case by case: whole-array prints, array sections,
+    // allocatable prints, derived types and mixed element lists all come out byte-identical, because
+    // print_list_tuple already covers them. Two cases change for the better — the scalar loop and a
+    // mixed list inside a loop, both of which were printing nothing.
+    //
+    // /skip.txt adds to this list if the host writes one, which is how it was bisected and how a future
+    // regression can be narrowed without a rebuild.
+    std::vector<std::string> skip = {"print_arr"};
+    if (FILE *f = std::fopen("/skip.txt", "r")) {
+        char line[512];
+        while (std::fgets(line, sizeof(line), f)) {
+            std::string s(line);
+            while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+            if (!s.empty()) skip.push_back(s);
+        }
+        std::fclose(f);
+    }
+    lpm.passes_to_skip_with_llvm = skip;
+    std::string no_arg_pass, no_skip_pass;
+    lpm.parse_pass_arg(no_arg_pass, no_skip_pass);
+    // Deliberately nothing on stderr here. The host treats the program's stderr as the diagnostics of
+    // the run, and a *successful* run returns whatever is on stderr as `errors` — so a note about
+    // configuration reads as a diagnostic on every program that works. A "passes: skipping 1:
+    // print_arr" line did exactly that until it was removed.
     LCompilers::diag::Diagnostics diagnostics;
 
     // The same string that was registered with the location manager, so the file it knows about and
